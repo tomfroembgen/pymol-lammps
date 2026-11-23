@@ -63,10 +63,13 @@ load traj.lammpstrj                               # also works, without topology
 Then, for example:
 
 ```
-hide everything
+hide everything, (all)    # the parentheses keep the box visible
 show sticks
 util.cbag
 ```
+
+A plain `hide everything` also hides the box object; bring it back with
+`show cgo, *_box`.
 
 
 ## The data file: why `data=` matters
@@ -175,6 +178,7 @@ select first100, ID 1-100       # LAMMPS atom IDs
 | `resn c2c1im+` selects nothing | `+` separates list items in PyMOL selections; use `resn c2c1im*` |
 | "Selector-Error" or "cannot find object" | the object name is a PyMOL keyword (e.g. `elem`, `name`); pass `object=...` |
 | PyMOL runs out of memory | all frames are held in memory; use `interval=` or `start=`/`stop=` |
+| the box disappeared | `hide everything` (or `hide everything, all`) hides all objects; use `hide everything, (all)` and restore with `show cgo, *_box` |
 | `show cell` draws the box in the wrong place | PyMOL draws the cell from the origin; use the `<object>_box` object instead |
 
 
