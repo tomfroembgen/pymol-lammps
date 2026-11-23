@@ -157,6 +157,23 @@ class Frame:
         """Atom IDs in ascending order."""
         return self.column("id").astype(np.int64)
 
+    def _position_columns(self) -> tuple[tuple[str, str, str], bool]:
+        """Return the preferred position columns and whether they are scaled."""
+        return next(
+            (names, scaled)
+            for names, scaled in _POSITION_COLUMNS
+            if all(name in self.columns for name in names)
+        )
+
+    @property
+    def unwrapped(self) -> bool:
+        """True if ``positions()`` gives unwrapped coordinates.
+
+        Unwrapped coordinates keep molecules whole across the periodic boundary.
+        """
+        names, _ = self._position_columns()
+        return names[0].endswith("u") or all(n in self.columns for n in _IMAGE_COLUMNS)
+
     def positions(self) -> NDArray[np.float64]:
         """Return Cartesian positions in Angstrom, unwrapped where possible.
 
@@ -168,9 +185,7 @@ class Frame:
         NDArray[np.float64]
             Positions, shape (n_atoms, 3), sorted by atom ID.
         """
-        for names, scaled in _POSITION_COLUMNS:
-            if all(name in self.columns for name in names):
-                break
+        names, scaled = self._position_columns()
         xyz = np.column_stack([self.column(name) for name in names]).astype(float)
         wrapped = not names[0].endswith("u")
         if wrapped and all(name in self.columns for name in _IMAGE_COLUMNS):

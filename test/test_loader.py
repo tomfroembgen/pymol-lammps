@@ -12,7 +12,7 @@ pymol = pytest.importorskip("pymol")
 
 from pymol import cmd  # noqa: E402
 
-from pymol_lammps.loader import load_lammps, register  # noqa: E402
+from pymol_lammps.loader import lammps_wrap, load_lammps, register  # noqa: E402
 
 WriteFile = Callable[[str, str], Path]
 
@@ -37,7 +37,7 @@ def n_bonds(name: str) -> int:
 
 
 def test_load_with_data_file(water_dump: Path, water_data: Path) -> None:
-    load_lammps(str(water_dump), data=str(water_data), object="water")
+    load_lammps(str(water_dump), data=str(water_data), object="water", wrap=0)
 
     assert cmd.count_states("water") == 3
     assert n_bonds("water") == 4
@@ -103,3 +103,46 @@ def test_errors_become_pymol_errors(write_file: WriteFile) -> None:
 
     with pytest.raises(pymol.CmdException, match="one set of positions"):
         load_lammps(str(path))
+
+
+def box_extent(name: str, state: int) -> tuple[float, float]:
+    x: list[float] = []
+    cmd.iterate_state(state, name, "x_.append(x)", space={"x_": x})
+    return min(x), max(x)
+
+
+def test_molecules_are_wrapped_by_default(water_dump: Path, water_data: Path) -> None:
+    load_lammps(str(water_dump), data=str(water_data), object="water")
+
+    # Frame 3: molecule 2 (O at x = 5.0) has its centre beyond the box edge at 5.
+    xs = [a[5] for a in atoms("water", 3)]
+    np.testing.assert_allclose(xs, [2.0, 2.96, 2.0, -5.0, -4.04, -5.0], atol=1e-5)
+
+
+def test_lammps_wrap_switches_after_loading(water_dump: Path, water_data: Path) -> None:
+    load_lammps(str(water_dump), data=str(water_data), object="water")
+    cmd.show_as("sticks", "water")
+
+    lammps_wrap("water", 0)
+    assert box_extent("water", 3)[1] > 5.9
+    assert cmd.count_atoms("water and rep sticks") == 6
+
+    lammps_wrap("water", 1)
+    assert box_extent("water", 3)[1] < 5.0
+
+
+def test_lammps_wrap_needs_a_loaded_object() -> None:
+    with pytest.raises(pymol.CmdException, match="not loaded with load_lammps"):
+        lammps_wrap("nothing")
+
+
+def test_no_molecule_ids_warns_for_unwrapped_dump(
+    write_file: WriteFile, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rows = [[1, 1, 6.0, 0, 0], [2, 1, 7.0, 0, 0]]
+    path = write_file("t.lammpstrj", frame_text("id type xu yu zu", rows))
+
+    load_lammps(str(path), elements="C")
+
+    assert "were not wrapped" in capsys.readouterr().out
+    assert box_extent("t", 1) == (6.0, 7.0)

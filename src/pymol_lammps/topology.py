@@ -62,6 +62,19 @@ class Topology:
     charges: NDArray[np.float64] | None
     bonds: NDArray[np.int64] | None
 
+    def molecule_index(self) -> NDArray[np.int64] | None:
+        """Return the molecule of each atom as an index from 0, for wrapping.
+
+        Returns
+        -------
+        NDArray[np.int64] | None
+            Molecule index per atom, or None if molecule IDs are unknown.
+        """
+        if not all(self.residue_ids):
+            return None
+        _, index = np.unique(self.residue_ids, return_inverse=True)
+        return index.astype(np.int64)
+
 
 def _positions_in(
     sorted_ids: NDArray[np.int64], query: NDArray[np.int64]

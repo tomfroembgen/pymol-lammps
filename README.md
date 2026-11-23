@@ -11,7 +11,9 @@ load_lammps traj.lammpstrj, data=system.data
 ```
 
 - Each dump frame becomes one PyMOL state; play them with the movie controls.
-- The simulation box of every frame is drawn as a grey object, also for NPT runs.
+- The simulation box of every frame, as written in the dump, is drawn as a grey
+  object, also for NPT runs.
+- Whole molecules are wrapped into the box of each frame (switchable).
 - Atoms are matched by LAMMPS atom ID in every frame, so dumps written without
   `dump_modify sort id` load correctly.
 - Pure Python (NumPy only, which ships with PyMOL): no compiling, and it keeps
@@ -71,6 +73,37 @@ util.cbag
 A plain `hide everything` also hides the box object; bring it back with
 `show cgo, *_box`.
 
+Playback speed is a PyMOL setting, in frames per second (default 30):
+
+```
+set movie_fps, 5      # each frame is shown for 0.2 s
+```
+
+Put it in your `~/.pymolrc` to keep it. To play through a long run faster, load
+only every n-th frame instead: `load_lammps traj.lammpstrj, interval=10`.
+
+
+## Wrapping molecules into the box
+
+By default, every molecule is shifted by whole box vectors so that its centre of
+geometry lies inside the box of that frame. Molecules stay intact; this also
+works for triclinic boxes. Molecules are taken from the LAMMPS molecule IDs (dump
+column `mol` or the data file).
+
+```
+lammps_wrap traj, 0       # back to the coordinates of the dump (e.g. to follow diffusion)
+lammps_wrap traj          # wrap again
+load_lammps traj.lammpstrj, data=system.data, wrap=0      # load without wrapping
+```
+
+`lammps_wrap` re-reads the coordinates from the dump file and keeps
+representations and colours. A molecule that crosses the boundary jumps to the
+opposite side between two frames; this is expected for wrapped coordinates.
+
+If the dump has wrapped coordinates without image flags, molecules cut by the
+boundary are first reassembled by walking along the bonds. This needs the bonds
+from a data file for molecules longer than half the box (peptides, polymers).
+
 
 ## The data file: why `data=` matters
 
@@ -107,9 +140,12 @@ The dump needs the columns `id`, `type` and positions. Recommended:
 dump TRAJ all custom 1000 traj.lammpstrj id mol type q xu yu zu
 ```
 
-- Use **unwrapped** coordinates (`xu yu zu`), or wrapped ones together with image
-  flags (`x y z ix iy iz`). With purely wrapped coordinates, molecules cut by the
-  box boundary show bonds stretching across the box.
+- Write the molecule ID (`mol`) or give a data file, so that molecules can be
+  wrapped as a whole.
+- Prefer **unwrapped** coordinates (`xu yu zu`), or wrapped ones together with
+  image flags (`x y z ix iy iz`). Purely wrapped coordinates work when molecules
+  can be reassembled (see above), but `wrap=0` then shows molecules cut by the
+  box boundary.
 - Scaled coordinates (`xs ys zs`, the default of `dump atom`) and triclinic boxes
   work too.
 - Gzipped dumps (`traj.lammpstrj.gz`) are read directly.
@@ -119,7 +155,8 @@ dump TRAJ all custom 1000 traj.lammpstrj id mol type q xu yu zu
 
 ```
 load_lammps filename [, data [, object [, start [, stop [, interval
-            [, elements [, box ]]]]]]]
+            [, elements [, box [, wrap ]]]]]]]]
+lammps_wrap object [, wrap ]
 ```
 
 | Argument | Meaning |
@@ -130,6 +167,7 @@ load_lammps filename [, data [, object [, start [, stop [, interval
 | `start`, `stop`, `interval` | first frame (1-based), last frame (inclusive, -1 = all), stride |
 | `elements` | element per atom type in type order, e.g. `C H O N`; overrides everything else |
 | `box` | 1 (default) draws the box of every frame as object `<object>_box`; 0 to skip |
+| `wrap` | 1 (default) wraps whole molecules into the box; 0 keeps the coordinates of the dump |
 
 Examples:
 
@@ -139,7 +177,7 @@ load_lammps traj.lammpstrj, elements=C H O N                 # no data file
 load_lammps traj.lammpstrj, data=system.data, object=run1, box=0
 ```
 
-From a Python script: `from pymol_lammps.loader import load_lammps`.
+From a Python script: `from pymol_lammps.loader import lammps_wrap, load_lammps`.
 
 ### What is stored where
 
@@ -174,7 +212,9 @@ select first100, ID 1-100       # LAMMPS atom IDs
 |---|---|
 | `load_lammps` is an unknown command | the `.pymolrc` block did not run; check the path in it and restart PyMOL |
 | warning "no element known for atom types ..." | give `data=` or `elements=` |
-| long bonds across the box | the dump has wrapped coordinates; dump `xu yu zu` or add `ix iy iz` |
+| long bonds across the box | molecules could not be reassembled: with `wrap=0` and a wrapped dump, or a molecule longer than half the box without a data file. Dump `xu yu zu` (or add `ix iy iz`), or give `data=` |
+| warning "molecules were not wrapped" | no molecule IDs: dump the `mol` column or give `data=` |
+| molecules jump between frames | they cross the boundary while wrapping is on; `lammps_wrap object, 0` shows continuous paths |
 | `resn c2c1im+` selects nothing | `+` separates list items in PyMOL selections; use `resn c2c1im*` |
 | "Selector-Error" or "cannot find object" | the object name is a PyMOL keyword (e.g. `elem`, `name`); pass `object=...` |
 | PyMOL runs out of memory | all frames are held in memory; use `interval=` or `start=`/`stop=` |
