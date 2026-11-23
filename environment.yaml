@@ -1,0 +1,16 @@
+# conda env create -f environment.yaml
+# Development environment; for plain use, the PyMOL you already have is enough.
+name: pymol-lammps
+channels:
+  - conda-forge
+dependencies:
+  - python=3.14
+  - numpy
+  - pymol-open-source
+  - coverage
+  - mypy
+  - pre-commit
+  - pytest
+  - ruff
+  - pip:
+      - covdefaults

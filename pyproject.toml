@@ -1,0 +1,44 @@
+[build-system]
+  requires = ["setuptools"]
+  build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+  testpaths = ["test"]
+  pythonpath = ["src"]
+
+
+[tool.ruff]
+  # oldest supported version (setup.cfg: python_requires)
+  target-version = "py312"
+
+[tool.ruff.lint]
+  # I = isort, UP = pyupgrade
+  select = ["I", "UP"]
+
+[tool.ruff.lint.isort]
+  known-first-party = ["pymol_lammps"]
+
+
+[tool.mypy]
+  # check against the oldest supported version (setup.cfg: python_requires)
+  python_version = "3.12"
+  check_untyped_defs = true
+  disallow_any_generics = true
+  disallow_incomplete_defs = true
+  disallow_untyped_defs = true
+  warn_redundant_casts = true
+  warn_unreachable = true
+  warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+  # PyMOL and its bundled chempy ship without type information
+  module = ["pymol", "pymol.*", "chempy", "chempy.*"]
+  ignore_missing_imports = true
+
+
+[tool.coverage.run]
+  plugins = ["covdefaults"]
+  source = ["./src"]
+
+[tool.coverage.report]
+  fail_under = 80
