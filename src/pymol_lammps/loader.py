@@ -9,7 +9,7 @@ update removes that table, ``load_lammps`` keeps working.
 import contextlib
 import warnings
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +26,7 @@ from pymol_lammps.bonds import (
     guess_bonds,
     max_bond_limit,
     molecule_index,
+    periodic_bonds,
     satellite_bonds,
 )
 from pymol_lammps.datafile import read_data
@@ -37,9 +38,11 @@ from pymol_lammps.drude import (
     satellite_pairs,
 )
 from pymol_lammps.dump import Box, Frame, parse_cell, read_frames
+from pymol_lammps.style import drude_style, refresh_dashes
 from pymol_lammps.topology import Topology, build_topology
 from pymol_lammps.wrapping import (
     Molecules,
+    attach_satellites,
     split_wrapping_molecules,
     wrap_molecules,
 )
@@ -157,6 +160,19 @@ def _finish_satellites(
             _self.bond(f"{name} and id {ids[i]}", f"{name} and id {ids[j]}")
 
 
+def _unbond(name: str, ids: list[int], pairs: NDArray[np.int64], _self: Any) -> None:
+    """Remove bonds from a loaded object; ``pairs`` are indices into ``ids``."""
+    for i, j in pairs.tolist():
+        # PyMOL stores atoms in its own order; the atom ID is stable.
+        _self.unbond(f"{name} and id {ids[i]}", f"{name} and id {ids[j]}")
+
+
+def _periodic_summary(count: int) -> str:
+    """Return the summary text for removed periodic bonds, or an empty string."""
+    plural = "" if count == 1 else "s"
+    return f", {count} periodic bond{plural} removed" if count else ""
+
+
 def _box_cgo(box: Box) -> list[float]:
     """Return the box edges as a CGO line object."""
     lines: list[float] = [cgo.BEGIN, cgo.LINES, cgo.COLOR, *BOX_COLOR]
@@ -220,7 +236,16 @@ def load_lammps(
     and virtual sites with element ``M``: select them with ``elem D`` and
     ``elem M``. Their bonds come from the data file; without one, each Drude is
     bonded to its nearest other atom and each virtual site to its nearest oxygen.
-    A dump of the cores only simply has no Drudes.
+    A dump of the cores only simply has no Drudes. ``drude_style`` draws them.
+
+    Bonds longer than half of the smallest box height cannot be real bonds: they
+    connect periodic images (a graphene sheet, a crystal). They are removed from the
+    display, in every frame, and their number is printed; bonds of Drudes and
+    virtual sites are never removed. (With ``wrap=0`` and a dump of wrapped
+    coordinates they are kept, because molecules cut by the boundary are shown as
+    they are.) A molecule that is bonded through the boundary and has wrapped
+    coordinates cannot be reassembled, so its atoms are wrapped one by one (with a
+    warning). With unwrapped coordinates it is kept in one piece.
 
     PyMOL usage::
 
@@ -284,10 +309,47 @@ def load_lammps(
         molecules = (
             None if index is None else Molecules.from_bonds(index, topology.bonds)
         )
+        bonds = topology.bonds
+        if molecules is not None and bonds is not None and not first.unwrapped:
+            # Wrapped coordinates: after reassembly, a network bonded through the
+            # boundary still has a bond longer than half the cell; no bond of a real
+            # molecule is. Unwrapped coordinates need no reassembly: a sheet stays
+            # in one piece and is shifted as a whole.
+            half = cell_heights(first.box).min() / 2
+            molecules, n_periodic = split_wrapping_molecules(
+                first.positions(),
+                molecules,
+                first.box,
+                bonds,
+                np.full(len(bonds), half),
+            )
+            if n_periodic:
+                molecules = attach_satellites(
+                    molecules, bonds, satellite_mask(topology.elements)
+                )
+                if int(wrap):
+                    warnings.warn(
+                        f"{n_periodic} molecule(s) are bonded through the box "
+                        "boundary (sheet, chain or crystal); their atoms are "
+                        "wrapped individually",
+                        stacklevel=2,
+                    )
         do_wrap = bool(int(wrap)) and _can_wrap(molecules, first)
 
-        _self.delete(f"{name} {name}_box")
-        model = _chempy_model(topology, _coordinates(first, molecules, do_wrap))
+        coordinates = _coordinates(first, molecules, do_wrap)
+        # Wrapped coordinates that are not reassembled (wrap=0) show molecules cut
+        # by the boundary as the file has them, with their long bonds.
+        check = bonds is not None and (do_wrap or first.unwrapped)
+        cut = np.zeros(0 if bonds is None else len(bonds), dtype=bool)
+        if bonds is not None and check:
+            cut = periodic_bonds(coordinates, bonds, topology.elements, first.box)
+        first_cut = cut.copy()
+
+        _self.delete(f"{name} {name}_box {name}_drude")
+        model = _chempy_model(
+            replace(topology, bonds=None if bonds is None else bonds[~cut]),
+            coordinates,
+        )
         _self.load_model(model, name, 1)
         # chempy cannot carry atom IDs; PyMOL numbers them from 0 on loading.
         _self.alter(name, "ID = ids[rank]", space={"ids": topology.ids.tolist()})
@@ -309,6 +371,11 @@ def load_lammps(
             coordinates = _coordinates(frame, molecules, do_wrap)
             _self.load_coordset(coordinates, name, n_states)
             _set_box(name, frame.box, n_states, show_box, _self)
+            if bonds is not None and check:
+                cut |= periodic_bonds(coordinates, bonds, topology.elements, frame.box)
+        if bonds is not None:
+            # Atoms wrapped one by one can cross the boundary in a later frame.
+            _unbond(name, topology.ids.tolist(), bonds[cut & ~first_cut], _self)
 
     _TRAJECTORIES[name] = _Trajectory(
         trajectory_path, int(start), int(stop), int(interval), molecules
@@ -317,7 +384,7 @@ def load_lammps(
     if not int(quiet):
         print(
             f" load_lammps: {n_states} frames of {len(topology.ids)} atoms "
-            f"loaded into '{name}'"
+            f"loaded into '{name}'{_periodic_summary(int(cut.sum()))}"
         )
 
 
@@ -391,6 +458,12 @@ def load_xyz(
     atom and each virtual site to its nearest oxygen, whatever the distance, and
     they travel with that molecule when it is wrapped. ``drude=0`` reads a label
     ``D`` as deuterium (element H) instead.
+
+    With ``wrap=1``, bonds longer than half of the smallest cell height (periodic
+    images, which PyMOL would draw through the cell) are removed from the display,
+    and their number is printed; bonds of Drudes and virtual sites are never
+    removed. With ``wrap=0`` all bonds are kept, as the file coordinates are shown
+    as they are.
 
     PyMOL usage::
 
@@ -482,6 +555,9 @@ def load_xyz(
                 bond_limits(elements, bonds),
             )
             if n_periodic:
+                molecules = attach_satellites(
+                    molecules, bonds, satellite_mask(elements)
+                )
                 warnings.warn(
                     f"{n_periodic} molecule(s) are bonded through the cell boundary "
                     "(chain, slab or crystal); their atoms are wrapped individually",
@@ -501,10 +577,19 @@ def load_xyz(
             bonds=None if first_box is None else bonds,
         )
 
-        _self.delete(f"{name} {name}_box")
-        model = _chempy_model(
-            topology, _xyz_coordinates(first.positions, first_box, molecules, do_wrap)
-        )
+        coordinates = _xyz_coordinates(first.positions, first_box, molecules, do_wrap)
+        # With wrap=0 the file coordinates are shown as they are, molecules cut by
+        # the boundary included.
+        check = first_box is not None and do_wrap
+        cut = np.zeros(len(bonds) if first_box is not None else 0, dtype=bool)
+        if first_box is not None and check:
+            cut = periodic_bonds(coordinates, bonds, elements, first_box)
+        first_cut = cut.copy()
+        if first_box is not None:
+            topology = replace(topology, bonds=bonds[~cut])
+
+        _self.delete(f"{name} {name}_box {name}_drude")
+        model = _chempy_model(topology, coordinates)
         _self.load_model(model, name, 1)
         _self.alter(name, "ID = ids[rank]", space={"ids": topology.ids.tolist()})
         if topology.bonds is None:
@@ -526,6 +611,11 @@ def load_xyz(
             _self.load_coordset(coordinates, name, n_states)
             if first_box is not None and frame_box is not None:
                 _set_box(name, frame_box, n_states, show_box, _self)
+                if check:
+                    cut |= periodic_bonds(coordinates, bonds, elements, frame_box)
+        if first_box is not None:
+            # Atoms wrapped one by one can cross the boundary in a later frame.
+            _unbond(name, topology.ids.tolist(), bonds[cut & ~first_cut], _self)
 
     _TRAJECTORIES[name] = _Trajectory(
         trajectory_path,
@@ -540,6 +630,7 @@ def load_xyz(
     if not int(quiet):
         print(
             f" load_xyz: {n_states} frames of {n_atoms} atoms loaded into '{name}'"
+            + _periodic_summary(int(cut.sum()))
             + ("" if first_box is not None else " (no cell: no box, no wrapping)")
         )
 
@@ -611,6 +702,7 @@ def lammps_wrap(
                     do_wrap = do_wrap and _can_wrap(trajectory.molecules, frame)
                 coordinates = _coordinates(frame, trajectory.molecules, do_wrap)
                 _self.load_coordset(coordinates, object, state)
+    refresh_dashes(object, _self=_self)
     if not int(quiet):
         action = "wrapped into the box" if do_wrap else "as in the file"
         print(f" lammps_wrap: coordinates of '{object}' {action}")
@@ -627,6 +719,7 @@ def register(_self: Any = cmd) -> None:
     _self.extend("load_lammps", load_lammps)
     _self.extend("load_xyz", load_xyz)
     _self.extend("lammps_wrap", lammps_wrap)
+    _self.extend("drude_style", drude_style)
     # Internal PyMOL table; skip quietly if a future version renames it.
     loadfunctions = getattr(importing, "loadfunctions", None)
     if loadfunctions is not None:

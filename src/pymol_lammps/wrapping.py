@@ -134,6 +134,40 @@ def split_wrapping_molecules(
     return Molecules.from_bonds(index.astype(np.int64), bonds), len(cut)
 
 
+def attach_satellites(
+    molecules: Molecules, bonds: NDArray[np.int64], satellite: NDArray[np.bool_]
+) -> Molecules:
+    """Move every Drude particle and virtual site into the molecule of its host.
+
+    After ``split_wrapping_molecules`` each atom of a periodic network is wrapped on
+    its own. A Drude wrapped separately from its core would sit on the opposite side
+    of the box, so each satellite is assigned to the (single-atom) molecule of the
+    atom it is bonded to.
+
+    Parameters
+    ----------
+    molecules : Molecules
+        Molecule membership and reassembly order.
+    bonds : NDArray[np.int64]
+        Bonded atom pairs, shape (n_bonds, 2).
+    satellite : NDArray[np.bool_]
+        True for Drude particles and virtual sites, shape (n_atoms,).
+
+    Returns
+    -------
+    Molecules
+        The molecules with the satellites next to their hosts.
+    """
+    index = molecules.index.copy()
+    pairs = bonds[satellite[bonds].any(axis=1)]
+    host_first = satellite[pairs[:, 0]]
+    satellites = np.where(host_first, pairs[:, 0], pairs[:, 1])
+    hosts = np.where(host_first, pairs[:, 1], pairs[:, 0])
+    index[satellites] = index[hosts]
+    _, index = np.unique(index, return_inverse=True)
+    return Molecules.from_bonds(index.astype(np.int64), bonds)
+
+
 def wrap_molecules(
     positions: NDArray[np.float64],
     molecules: Molecules,

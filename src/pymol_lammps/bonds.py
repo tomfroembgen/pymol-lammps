@@ -103,6 +103,41 @@ def bond_limits(elements: list[str], bonds: NDArray[np.int64]) -> NDArray[np.flo
     return radii[bonds[:, 0]] + radii[bonds[:, 1]] + BOND_TOLERANCE
 
 
+def periodic_bonds(
+    positions: NDArray[np.float64],
+    bonds: NDArray[np.int64],
+    elements: list[str],
+    box: Box,
+) -> NDArray[np.bool_]:
+    """Find the bonds that PyMOL would draw through the cell.
+
+    A bond longer than half of the smallest cell height cannot be a real bond: it
+    connects two periodic images, or two halves of a molecule cut by the boundary.
+    The test is made on the coordinates as they are displayed. Bonds of Drude
+    particles and virtual sites are never reported, because they are short and move
+    with their host atom.
+
+    Parameters
+    ----------
+    positions : NDArray[np.float64]
+        Displayed Cartesian positions in Angstrom, shape (n_atoms, 3).
+    bonds : NDArray[np.int64]
+        Bonded atom pairs, shape (n_bonds, 2).
+    elements : list[str]
+        Element symbol of each atom, with ``D`` and ``M`` for the satellites.
+    box : Box
+        Periodic cell of the frame.
+
+    Returns
+    -------
+    NDArray[np.bool_]
+        True for each bond to remove, shape (n_bonds,).
+    """
+    length = np.linalg.norm(positions[bonds[:, 0]] - positions[bonds[:, 1]], axis=1)
+    too_long = length > cell_heights(box).min() / 2
+    return too_long & ~satellite_mask(elements)[bonds].any(axis=1)
+
+
 def _distance_block(
     coordinates: NDArray[np.float64],
     rows: NDArray[np.int64],
