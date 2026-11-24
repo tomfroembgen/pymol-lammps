@@ -162,7 +162,7 @@ works on objects from `load_xyz` and switches between the two views after loadin
   Such molecules are detected, and a warning gives their number. Their atoms are
   wrapped one by one into the cell in the first frame and then follow their own
   path, and the bonds to the other side of the cell are removed from the display
-  (see [Drude particles](#drude-particles), paragraph on periodic bonds).
+  (see [Periodic bonds](#periodic-bonds)).
 - In a strongly skewed cell, rounding to the nearest image can fail for bonds. The
   bond search tests the neighbouring cells as well, but wrapping does not. A warning
   is printed if the smallest height of the cell (the distance between two opposite
@@ -185,63 +185,65 @@ works on objects from `load_xyz` and switches between the two views after loadin
 ## Drude particles
 
 Polarizable force fields such as CL&Pol represent the electronic polarization of an
-atom by a light, charged *Drude particle* that is tied to its core atom by a stiff
-spring. Some water models (for example SWM4-NDP) add a massless *M site* (a virtual
-site that carries the charge of the oxygen). Both are loaded as ordinary atoms, so
-that the coordinates of the dump can be used unchanged.
+atom by a light, charged *Drude particle* that is tied to its atom by a stiff spring.
+Some water models (for example SWM4-NDP) add a massless *M site* (a virtual site that
+carries the charge of the oxygen). We call the atom that a Drude particle or an M
+site belongs to its *host*: the polarizable atom of a Drude particle, and the oxygen
+of an M site. Drude particles and M sites are loaded as ordinary atoms, so that the
+coordinates of the dump can be used unchanged.
 
 **Detection.** A Drude particle gets the element `D` and an M site the element `M`.
-They are recognised in this order:
+The rules below are tried in this order, and the first one that applies to an atom
+type decides:
 
-1. With `drude=21 22 23`, the atom types in the list are Drude particles (the mass
-   rule below is then off).
-2. The element label `D` or `M` (case-insensitive) in the `element` column of the
+1. `drude=0` switches the detection of Drude particles off. A label `D` then means
+   deuterium, and only the M sites are recognised (by rules 4 and 5).
+2. With `drude=21 22 23`, the atom types in the list are Drude particles, whatever
+   the `element` column of the dump or `elements=` says. Masses and the data file
+   then mark no further Drude types, but a label `D` still does (rule 4).
+3. With a data file, every atom type that the data file marks as a Drude type is a
+   Drude particle, and every massless type (mass below 1e-8 g/mol) an M site,
+   whatever the `element` column or `elements=` says. The data file marks a Drude
+   type by a mass between 0 and 0.8 g/mol or by the word `DP` in the comment of its
+   `Masses` line (fftool writes `# NA DP`). A dump written with another label for
+   the Drude particles therefore still loads correctly. With `drude=21 22 23`, only
+   the M sites are taken from the data file.
+4. The element label `D` or `M` (case-insensitive) in the `element` column of the
    dump, in `elements=`, or in an xyz file.
-3. If the elements come from the masses, a type with a mass between 0 and
+5. If the elements come from the masses, a type with a mass between 0 and
    0.8 g/mol is a Drude particle (their masses are about 0.4 g/mol, and hydrogen is
    1.008 g/mol), and a type with a mass below 1e-8 g/mol is an M site.
 
-A data file takes precedence over the element labels of rules 1 and 2. Every atom
-type that the data file marks as a Drude type, either by a mass between 0 and
-0.8 g/mol or by the word `DP` in the comment of its `Masses` line (fftool writes
-`# NA DP`), is loaded as `D`. A massless type in the data file is loaded as `M`.
-This holds whatever the `element` column of the dump or `elements=` says, so a dump
-written with another label for the Drude particles still loads correctly. With
-`drude=21 22 23`, only the listed types are Drude types, and the word `DP` is not
-used.
-
-`drude=0` switches the Drude detection off, including the precedence of the data
-file, and a label `D` then means deuterium. A dump that contains only the core atoms
-has no Drude particles and loads as before.
+A dump without the Drude particles has none and loads as before.
 
 Because the label `D` is also the symbol of deuterium, the loaders check the
-distance of the `D` atoms to the atom they are bonded to in the first frame. A Drude
-particle sits about 0.01 A from its core, whereas a deuterium atom sits about 0.96 A
-from its oxygen. If the median distance is larger than 0.3 A, the loaders print a
-warning that the atoms look like deuterium and suggest loading again with
-`drude=0`. The warning is not printed with `quiet=1`.
+distance of the `D` atoms to their host in the first frame. A Drude particle sits
+about 0.01 A from its host, whereas a deuterium atom sits about 0.96 A from its
+oxygen. If the median distance is larger than 0.3 A, the loaders print a warning
+that the atoms look like deuterium and suggest loading again with `drude=0`. The
+warning is not printed with `quiet=1`.
 
 **Selections and bonds.** `select drudes, elem D` and `select msites, elem M` find
 the particles, and the LAMMPS atom type stays available as `numeric_type`. PyMOL
 treats the symbol `D` as deuterium, which would make `hide (hydro)` hide the Drude
-particles too; the loader removes them from `hydro`. Each Drude particle is bonded to
-its core and each M site to its oxygen, taken from the data file. Without a data
-file, and for xyz files, the nearest other atom is used (the nearest oxygen for an
-M site). Drude particles and M sites travel with their molecule when it is wrapped.
-In addition, every Drude particle and M site is moved in every frame to the periodic
-image that lies next to its host atom, also with `wrap=0`. A particle is therefore
-never shown on the other side of the box from its core, even if the dump has wrapped
-coordinates and the molecule cannot be reassembled (no molecule IDs, or a molecule
-longer than half the box without a data file).
+particles too; the loader removes them from `hydro`. Each Drude particle and M site
+is bonded to its host as the data file says. Without a data file, for xyz files, and
+for particles that have no bond in the data file (an M site held in place by
+`fix rigid`, for example), the host is the nearest atom that is no Drude particle or
+M site (the nearest oxygen for an M site). Drude particles and M sites travel with
+their molecule when it is wrapped. In addition, every Drude particle and M site is
+moved in every frame to the periodic image next to its host, also with `wrap=0`. A
+particle is therefore never shown on the other side of the box from its host, even
+if the dump has wrapped coordinates and the molecule cannot be reassembled (no
+molecule IDs, or a molecule longer than half the box without a data file).
 
-**Display style.** A Drude particle lies very close to its core. In the first frame
+**Display style.** A Drude particle lies very close to its host. In the first frame
 of a simulation of an ionic liquid on graphene with 3036 Drude particles, the median
-distance between a Drude particle and its core is 0.0095 A and the largest 0.085 A.
-In the usual stick style the particle is therefore hidden inside its core atom.
-Already on loading, Drude particles and M sites get the colours and radii that are
-described below, but they keep the representations of all other atoms, so that
-loading does not change what is shown. `drude_style` then gives the particles their
-own look:
+distance between a Drude particle and its host is 0.0095 A and the largest 0.085 A.
+In the usual stick style the particle is therefore hidden inside its host. Already
+on loading, Drude particles and M sites get the colours and radii that are described
+below, but they keep the representations of all other atoms, so that loading does
+not change what is shown. `drude_style` then gives the particles their own look:
 
 ```
 drude_style                     # all objects
@@ -250,31 +252,45 @@ drude_style traj, dashed=0      # thin solid bonds instead of dashed ones
 ```
 
 For every Drude particle or M site in the selection, the command hides the sticks,
-shows a sphere, and colours it. Only particles that are shown, or whose host atom is
+shows a sphere, and colours it. Only particles that are shown, or whose host is
 shown, are changed, so that molecules hidden before stay hidden. Drude particles
 become dark-gray spheres (`drude_gray`, RGB 0.3 0.3 0.3) with a radius of 0.25 A,
-and M sites light-gray spheres (`vsite_gray`, 0.72 0.72 0.72) with the same radius. The radius is the radius
-as drawn: it does not depend on `sphere_scale`. It is clearly smaller than an ion
-sphere in the style `tf` (about 0.5 A, which is a van der Waals radius of 1.5 to
-1.8 A times `sphere_scale` 0.3) and larger than a stick (0.2 A), so a Drude particle
-remains visible on its core. The two colours are not used for any element by PyMOL
-or by `tf`.
+and M sites light-gray spheres (`vsite_gray`, 0.72 0.72 0.72) with the same
+radius. The radius is the radius as drawn: it does not depend on `sphere_scale`. It
+is clearly smaller than an ion sphere in the style `tf` (about 0.5 A, which is a van
+der Waals radius of 1.5 to 1.8 A times `sphere_scale` 0.3) and larger than a stick
+(0.2 A), so a Drude particle remains visible on its host. The two colours are not
+used for any element by PyMOL or by `tf`. The selection must contain atoms: the box
+object, the dash object or a name that does not exist give an error.
 
 The bond of a particle to its host is drawn as a thin dashed line. PyMOL cannot dash
 sticks, so the command creates a distance object `<object>_drude` that measures only
-the bonded pairs of the Drude particles and M sites, with its labels hidden. The
-object contains the pairs of all states, so the dashes follow the trajectory. The
-command remembers the dashed particles by atom ID, so that `lammps_wrap` can update
-the dashes when it changes the coordinates, also after the selection used for
+the bonded pairs of the Drude particles and M sites, with its labels hidden. Bonds
+longer than 5 A get no dash; this limit lets PyMOL search only nearby atoms, and the
+bond of a particle that is placed next to its host is far shorter. The object
+contains one set of dashes for each state, so the dashes follow the trajectory, and
+the time to create or update it grows with the number of frames. The command
+remembers the dashed particles by atom ID, so that `lammps_wrap` can update the
+dashes when it changes the coordinates, also after the selection used for
 `drude_style` was deleted. The dashes have a length of 0.08 A, a gap of 0.07 A and a
-radius of 0.045 A. With `dashed=0`, the bonds are instead sticks with a radius of
-0.05 A. Calling `drude_style` again on another part of the object adds its dashes to
-the existing ones, and `dashed=0` removes the dashes of the particles it styles.
-Loading the object again deletes the dash object. For the ionic liquid on graphene
-(8237 atoms, 3036 Drude particles, 10 frames), we measured 2 s to create the dashes
-and less than 0.3 s for the solid sticks on an Apple M3 Pro. Ray-tracing one frame
-took the same time, within 10 %, with the dashes, with the solid sticks and with
-neither. The box object is not touched.
+radius of 0.045 A. Calling `drude_style` again on another part of the object adds
+its dashes to the existing ones, and `dashed=0` removes the dashes of the particles
+it styles. Loading the object again deletes the dash object.
+
+With `dashed=0`, the bonds are instead sticks with a radius of 0.05 A. The command
+shows sticks on the particles only and never changes the representations of their
+hosts. Because PyMOL draws a stick bond only between two atoms that both show
+sticks, the thin bond appears where the host shows sticks; in a view of lines or of
+spheres the particles get no visible bond. We chose this behaviour because showing
+sticks on the hosts as well would also draw the bonds between the hosts, which
+turns a view of spheres into one of spheres and sticks.
+
+For the ionic liquid on graphene (8237 atoms, 3036 Drude particles, 10 frames), we
+measured 0.29 s for `drude_style` with dashes and 0.22 s with solid sticks, and
+0.19 s for a following `lammps_wrap` with dashes, of which 0.06 s is the update of
+the dashes (Apple M3 Pro). Ray-tracing one frame took the same time, within 10 %,
+with the dashes, with the solid sticks and with neither. The box object is not
+touched.
 
 Run `drude_style` after the command that sets the general style (such as `tf`),
 because that command shows sticks on all atoms. To change the look afterwards:
@@ -290,21 +306,24 @@ alter elem D, vdw=0.2                # another radius; then: rebuild
 
 The sizes and colours are also constants at the top of `pymol_lammps/style.py`.
 Dashes only become visible if a Drude particle is displaced by more than about
-0.3 A from its core; for smaller displacements the dashed line is hidden in the
+0.3 A from its host; for smaller displacements the dashed line is hidden in the
 spheres and sticks, and the solid fallback behaves in the same way.
 
-**Periodic bonds.** If a molecule is bonded through the periodic boundary (a
-graphene sheet or a crystal), the data file contains bonds between the atoms and
-the periodic images of their neighbours. PyMOL draws them as sticks through the
-whole box. After loading, bonds longer than half of the smallest height of the box
-are therefore removed from the display, and the summary line says how many (150
-for the two graphene sheets of the ionic-liquid example, whose dump has unwrapped
-coordinates). No real bond is that long, and the bonds of Drude particles and M
-sites are never removed. `load_xyz` does the same for periodic networks that it
-finds. With `wrap=0` and a file of wrapped coordinates, all bonds are kept, because
-molecules cut by the boundary are then shown as they are in the file. `lammps_wrap`
-finds the periodic bonds again for the new coordinates, so switching between the two
-views removes and restores them.
+
+## Periodic bonds
+
+If a molecule is bonded through the periodic boundary to its own periodic image (a
+graphene sheet, an infinite chain or a crystal; we call it a *periodic network*),
+the data file contains bonds between atoms and the periodic images of their
+neighbours. PyMOL draws them as sticks through the whole box. After loading, bonds
+longer than half of the smallest height of the box are therefore removed from the
+display, and the summary line says how many (150 for the two graphene sheets of the
+ionic-liquid example, whose dump has unwrapped coordinates). No real bond is that
+long, and the bonds of Drude particles and M sites are never removed. `load_xyz`
+does the same for periodic networks that it finds. With `wrap=0` and a file of
+wrapped coordinates, all bonds are kept, because molecules cut by the boundary are
+then shown as they are in the file. `lammps_wrap` finds the periodic bonds again for
+the new coordinates, so switching between the two views removes and restores them.
 
 PyMOL stores bonds per object, not per frame, so a bond removed in one frame is
 missing in all frames. The loader therefore keeps the set of removed bonds the same
@@ -312,17 +331,19 @@ in all frames. A periodic network cannot be reassembled into one piece if its
 coordinates are wrapped, because it is connected to its own images. For a dump with
 wrapped coordinates, `load_lammps` therefore wraps the atoms of such a network one
 by one in the first frame, with a warning, in the same way as `load_xyz`; a Drude
-particle is wrapped together with its core. In every later frame, each atom of the
+particle is wrapped together with its host. In every later frame, each atom of the
 network is placed at the periodic image closest to its position in the previous
 frame, and the whole network is shifted by box vectors so that its centre stays in
-the box. The network is therefore cut at the same bonds in every frame, and atoms
-near the boundary may lie slightly outside the box. This needs atoms that move by
-less than half a box between two loaded frames, which holds for any usual dump
-interval. If every frame were instead wrapped atom by atom, the removed bonds would
-add up over the frames: for the graphene sheets of the example written with wrapped
-coordinates, 196 bonds are cut in the first frame, but 290 different bonds in the
-first four frames together, among them real C-C bonds. With unwrapped coordinates
-(`xu yu zu`), the sheet is already in one piece and stays one piece.
+the box. The network is therefore cut at the same bonds in every frame. This needs
+atoms that move by less than half a box between two loaded frames, which holds for
+any usual dump interval.
+
+Only the centre of the network is kept in the box, not each of its atoms. A network
+that drifts through the box is shown as a continuous piece that follows its own
+path, and its atoms can lie outside the box by up to about half a box length when
+its centre is near a face of the box. A graphene sheet that is fixed in space, as in
+the ionic-liquid example, stays where it is. With unwrapped coordinates
+(`xu yu zu`), the network is already in one piece and is shifted as a whole.
 
 
 ## The data file: why `data=` matters
@@ -392,7 +413,7 @@ load_xyz filename [, object [, start [, stop [, interval [, cell [, box
 | `box` | 1 (default) draws the box of every frame as object `<object>_box`; 0 to skip |
 | `wrap` | 1 (default) wraps whole molecules into the box; 0 keeps the coordinates of the dump |
 | `quiet` | 1 suppresses the summary line; 0 (default) prints it |
-| `drude` | `auto` (default) finds Drude particles by label and mass; `0` switches this off (label `D` is then deuterium); a list of atom types such as `21 22 23` names the Drude types (see [Drude particles](#drude-particles)) |
+| `drude` | `auto` (default) finds Drude particles by data file, label and mass; `0` switches this off (label `D` is then deuterium); a list of atom types such as `21 22 23` names the Drude types (see [Drude particles](#drude-particles)) |
 | `selection` | `drude_style`: atoms whose Drude particles and M sites are styled; default `all` |
 | `dashed` | `drude_style`: 1 (default) draws the bonds of the particles as dashes, 0 as thin sticks |
 
@@ -417,7 +438,7 @@ From a Python script:
 
 | PyMOL property | Source, first available wins |
 |---|---|
-| `elem` | Drude and M-site types of the data file (`D`, `M`, unless `drude=0`) > `elements=` > dump `element` column > mass (dump `mass` column, data-file `Masses`) > `C` with a warning |
+| `elem` | Drude types of `drude=21 22 23` (`D`) > Drude and M-site types of the data file (`D`, `M`, unless `drude=0`) > `elements=` > dump `element` column > mass (dump `mass` column, data-file `Masses`) > `C` with a warning |
 | `name` | data-file comment after the atom (fftool) > type label or `Masses` comment > type number |
 | `resn` | data-file comment after the atom (fftool writes the species, e.g. `c2c1im+`) |
 | `resi` | dump `mol` column > data-file molecule ID |
@@ -446,7 +467,7 @@ select first100, ID 1-100       # LAMMPS atom IDs
 |---|---|
 | `load_lammps` or `load_xyz` is an unknown command | the `.pymolrc` block did not run; check the path in it and restart PyMOL |
 | warning "no element known for atom types ..." | give `data=` or `elements=` |
-| long bonds across the box | bonds between periodic images are removed after loading (see [Drude particles](#drude-particles)); other long bonds mean molecules could not be reassembled: with `wrap=0` and a wrapped dump, or a molecule longer than half the box without a data file. Dump `xu yu zu` (or add `ix iy iz`), or give `data=` |
+| long bonds across the box | bonds between periodic images are removed after loading (see [Periodic bonds](#periodic-bonds)); other long bonds mean molecules could not be reassembled: with `wrap=0` and a wrapped dump, or a molecule longer than half the box without a data file. Dump `xu yu zu` (or add `ix iy iz`), or give `data=` |
 | warning "molecules were not wrapped" | no molecule IDs: dump the `mol` column or give `data=` |
 | molecules jump between frames | they cross the boundary while wrapping is on; `lammps_wrap object, 0` shows continuous paths |
 | `resn c2c1im+` selects nothing | `+` separates list items in PyMOL selections; use `resn c2c1im*` |
@@ -481,8 +502,10 @@ pre-commit install
 pytest
 ```
 
-The parsers (`dump.py`, `datafile.py`, `topology.py`, `xyz.py`, `bonds.py`) need only NumPy; the PyMOL
-commands are in `loader.py` and `style.py`. The tests in `test/test_loader.py` need PyMOL and
-are skipped where it is not importable.
+The modules `dump.py`, `datafile.py`, `topology.py`, `xyz.py`, `bonds.py`,
+`drude.py` and `wrapping.py` need only NumPy; the PyMOL commands are in `loader.py`
+and `style.py`. The tests in `test_loader.py`, `test_load_xyz.py`,
+`test_drude_loading.py`, `test_periodic_bonds.py` and `test_style.py` need PyMOL and
+are skipped where it is not importable; all other tests need only NumPy.
 
 License: MIT (see `LICENSE.md`). Author: Tom Frömbgen.
