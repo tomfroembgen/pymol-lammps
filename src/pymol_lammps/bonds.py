@@ -19,12 +19,15 @@ time grows linearly with the number of atoms.
 """
 
 import itertools
+import warnings
+from collections.abc import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 
 from pymol_lammps.drude import DRUDE, SATELLITES, VIRTUAL
 from pymol_lammps.dump import Box
+from pymol_lammps.elements import element_symbol
 
 # Covalent radii in Angstrom (Cordero et al., Dalton Trans. 2008, 2832; single-bond,
 # low-spin values for Mn, Fe and Co), for the elements in ``ELEMENT_MASSES``.
@@ -58,10 +61,43 @@ SATELLITE_RADIUS = 0.5
 # Atoms per block of the pair search; a block needs about chunk * n_atoms * 24 bytes.
 _CHUNK = 128
 
+# Element whose covalent radius bonds an atom with an unknown element label.
+FALLBACK_BOND_ELEMENT = "C"
+
 # Radius in Angstrom of the cell-list search for the host of a satellite. A Drude
 # sits 0.1-0.4 A from its core and an M site about 0.25 A from its oxygen; a satellite
 # without any candidate this close is searched among all atoms instead.
 HOST_SEARCH_RADIUS = 2.0
+
+
+def bonding_elements(labels: Sequence[str]) -> list[str]:
+    """Return the element whose covalent radius bonds each atom.
+
+    The element labels of a dump (``element`` column or ``elements=``) are free
+    text, so each label is reduced to an element symbol by
+    ``pymol_lammps.elements.element_symbol`` (``"CL"`` is Cl, ``"OW"`` is O). A
+    label that does not start with an element is bonded like carbon, with a
+    warning.
+
+    Parameters
+    ----------
+    labels : Sequence[str]
+        Element label of each atom, with ``D`` and ``M`` for the satellites.
+
+    Returns
+    -------
+    list[str]
+        Element symbol of each atom, a key of ``COVALENT_RADII`` or a satellite.
+    """
+    symbols = {label: element_symbol(label) for label in set(labels)}
+    unknown = sorted(label for label, symbol in symbols.items() if not symbol)
+    if unknown:
+        warnings.warn(
+            f"no covalent radius for the element labels {unknown}; their bonds are "
+            f"guessed as for {FALLBACK_BOND_ELEMENT}",
+            stacklevel=2,
+        )
+    return [symbols[label] or FALLBACK_BOND_ELEMENT for label in labels]
 
 
 def cell_heights(box: Box) -> NDArray[np.float64]:
@@ -140,9 +176,10 @@ def periodic_bonds(
     NDArray[np.bool_]
         True for each bond to remove, shape (n_bonds,).
     """
-    length = np.linalg.norm(positions[bonds[:, 0]] - positions[bonds[:, 1]], axis=1)
-    too_long = length > cell_heights(box).min() / 2
-    return too_long & ~satellite[bonds].any(axis=1)
+    delta = np.take(positions, bonds[:, 0], axis=0)
+    delta -= np.take(positions, bonds[:, 1], axis=0)
+    too_long = np.einsum("ij,ij->i", delta, delta) > (cell_heights(box).min() / 2) ** 2
+    return too_long & ~(satellite[bonds[:, 0]] | satellite[bonds[:, 1]])
 
 
 def _distance_block(
@@ -188,6 +225,7 @@ def _neighbour_pairs(
     candidates: NDArray[np.int64],
     box: Box | None,
     cutoff: float,
+    half: bool = False,
 ) -> tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.float64]]:
     """Find all pairs of a query atom and a candidate atom closer than ``cutoff``.
 
@@ -196,6 +234,10 @@ def _neighbour_pairs(
     around it (a cell list). In a periodic cell the grid wraps around, and the
     distance is the minimum-image distance, which is exact for ``cutoff`` below half
     of the smallest cell height.
+
+    If the query atoms are also the candidates, ``half`` finds each pair once: of
+    two opposite neighbour cells only one is searched, and within the own cell only
+    the pairs with the higher candidate index. This halves the number of distances.
 
     Parameters
     ----------
@@ -207,6 +249,9 @@ def _neighbour_pairs(
         Periodic cell, or None for plain distances.
     cutoff : float
         Largest distance in Angstrom.
+    half : bool, optional
+        True if ``queries`` and ``candidates`` are the same atoms; each pair is then
+        returned once, and no atom is paired with itself.
 
     Returns
     -------
@@ -231,40 +276,66 @@ def _neighbour_pairs(
 
     keys = np.ravel_multi_index(tuple(cells[candidates].T), tuple(n_cells))
     by_cell = candidates[np.argsort(keys, kind="stable")]
+    if half:
+        # The same atoms in the order of the cells, which makes the memory access
+        # below more local.
+        queries = by_cell
     counts = np.bincount(keys, minlength=int(n_cells.prod()))
     starts = np.cumsum(counts) - counts
-    # Neighbouring cells along each axis; with fewer than three cells the periodic
-    # neighbours repeat, so each is taken once.
-    steps = [
-        np.unique(np.array([-1, 0, 1]) % n) if periodic else np.array([-1, 0, 1])
-        for n in n_cells
-    ]
-    query_parts: list[NDArray[np.int64]] = []
-    candidate_parts: list[NDArray[np.int64]] = []
-    for step in itertools.product(*steps):
-        neighbour = cells[queries] + np.array(step)
-        if periodic:
-            neighbour %= n_cells
-        inside = ((neighbour >= 0) & (neighbour < n_cells)).all(axis=1)
-        cell_keys = np.ravel_multi_index(tuple(neighbour[inside].T), tuple(n_cells))
-        number = counts[cell_keys]
-        # Position of every candidate of these cells in ``by_cell``.
-        offsets = np.arange(number.sum()) - np.repeat(
-            np.cumsum(number) - number, number
+    if half:
+        # The own cell (first) and one cell of each opposite pair.
+        stencil = [s for s in itertools.product((-1, 0, 1), repeat=3) if s >= (0, 0, 0)]
+    else:
+        # Neighbouring cells along each axis; with fewer than three cells the
+        # periodic neighbours repeat, so each is taken once.
+        steps = [(0,) if n == 1 else (0, 1) if n == 2 else (-1, 0, 1) for n in n_cells]
+        stencil = list(
+            itertools.product(*(s if periodic else (-1, 0, 1) for s in steps))
         )
-        query_parts.append(np.repeat(queries[inside], number))
-        candidate_parts.append(by_cell[np.repeat(starts[cell_keys], number) + offsets])
-    query = np.concatenate(query_parts)
-    candidate = np.concatenate(candidate_parts)
+    # Cell index of every query atom shifted by -1, 0 and +1 cells along each axis,
+    # shape (3, n_queries, 3); the key of a neighbour cell is the sum of its three
+    # parts (C order, as np.ravel_multi_index).
+    shifted = cells[queries][None, :, :] + np.arange(-1, 2)[:, None, None]
+    if periodic:
+        shifted %= n_cells
+    valid = (shifted >= 0) & (shifted < n_cells)
+    part = np.where(
+        valid, shifted * np.array([n_cells[1] * n_cells[2], n_cells[2], 1]), 0
+    )
+    a, b, c = (np.array(stencil) + 1).T
+    cell_keys = (part[a, :, 0] + part[b, :, 1] + part[c, :, 2]).ravel()
+    inside = (valid[a, :, 0] & valid[b, :, 1] & valid[c, :, 2]).ravel()
+    number = np.where(inside, counts[cell_keys], 0)
+    # Position of every candidate of these cells in ``by_cell``.
+    offsets = np.arange(number.sum()) - np.repeat(np.cumsum(number) - number, number)
+    query = np.repeat(np.tile(queries, len(stencil)), number)
+    # np.take is faster than fancy indexing for these long index arrays.
+    candidate = np.take(by_cell, np.repeat(starts[cell_keys], number) + offsets)
+    if half:
+        # The pairs of the own cell come first; each is kept once.
+        own = number[: len(queries)].sum()
+        keep = np.ones(len(query), dtype=bool)
+        keep[:own] = candidate[:own] > query[:own]
+        query, candidate = query[keep], candidate[keep]
+        if periodic and (n_cells < 3).any():
+            # With fewer than three cells along an axis, the cells on both sides
+            # are the same, so pairs are found twice (and atoms paired with
+            # themselves).
+            pairs = np.sort(np.column_stack([query, candidate]), axis=1)
+            pairs = np.unique(pairs, axis=0)
+            query, candidate = pairs[pairs[:, 0] != pairs[:, 1]].T
 
     if box is None:
-        distance = np.linalg.norm(positions[candidate] - positions[query], axis=1)
+        delta = np.take(positions, candidate, axis=0) - np.take(
+            positions, query, axis=0
+        )
     else:
-        delta = fractional[candidate] - fractional[query]
-        delta -= np.round(delta)
-        distance = np.linalg.norm(delta @ box.matrix.T, axis=1)
-    close = distance < cutoff
-    return query[close], candidate[close], distance[close]
+        shift = np.take(fractional, candidate, axis=0)
+        shift -= np.take(fractional, query, axis=0)
+        delta = (shift - np.round(shift)) @ box.matrix.T
+    squared = np.einsum("ij,ij->i", delta, delta)
+    close = squared < cutoff**2
+    return query[close], candidate[close], np.sqrt(squared[close])
 
 
 def _nearest(
@@ -395,10 +466,10 @@ def _bonds_by_radii(
     if box is None or cutoff < cell_heights(box).min() / 2:
         # Each bonded pair is closer than the largest limit, so a cell list finds
         # all of them; rounding gives the minimum image at these distances.
-        i, j, distance = _neighbour_pairs(positions, kept, kept, box, cutoff)
+        i, j, distance = _neighbour_pairs(positions, kept, kept, box, cutoff, True)
         limit = radii[i] + radii[j] + BOND_TOLERANCE
-        bonded = (distance < limit) & (distance > MIN_DISTANCE) & (i < j)
-        return np.column_stack([i[bonded], j[bonded]]).astype(np.int64)
+        bonded = (distance < limit) & (distance > MIN_DISTANCE)
+        return np.sort(np.column_stack([i[bonded], j[bonded]]), axis=1).astype(np.int64)
     coordinates, shifts = _search_setup(positions[kept], elements, box)
     columns = np.arange(len(kept))
     pairs: list[NDArray[np.int64]] = [np.empty((0, 2), dtype=np.int64)]
@@ -467,21 +538,23 @@ def molecule_index(n_atoms: int, bonds: NDArray[np.int64]) -> NDArray[np.int64]:
         Molecule of each atom, numbered from 0 in the order of the first atom of
         each molecule.
     """
-    parent = list(range(n_atoms))
-
-    def find(atom: int) -> int:
-        while parent[atom] != atom:
-            parent[atom] = parent[parent[atom]]
-            atom = parent[atom]
-        return atom
-
-    for i, j in bonds.tolist():
-        root_i, root_j = find(i), find(j)
-        if root_i != root_j:
-            parent[max(root_i, root_j)] = min(root_i, root_j)
-
-    roots = np.array([find(atom) for atom in range(n_atoms)], dtype=np.int64)
+    # Each atom points to an atom of lower or equal index in its molecule. For every
+    # bond, the higher of the two root atoms is pointed to the lower one (all bonds
+    # at once), and the pointers are then followed to the roots. This repeats until
+    # no bond joins two roots, so every molecule ends at its lowest atom index.
+    root = np.arange(n_atoms)
+    i, j = bonds.T
+    while True:
+        lower = np.minimum(root[i], root[j])
+        joined = root.copy()
+        np.minimum.at(joined, root[i], lower)
+        np.minimum.at(joined, root[j], lower)
+        while not np.array_equal(joined[joined], joined):
+            joined = joined[joined]
+        if np.array_equal(joined, root):
+            break
+        root = joined
     # The root of a component is its lowest atom index, so np.unique numbers the
     # molecules by their first atom.
-    _, index = np.unique(roots, return_inverse=True)
+    _, index = np.unique(root, return_inverse=True)
     return index.astype(np.int64)

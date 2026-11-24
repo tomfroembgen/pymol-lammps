@@ -168,15 +168,16 @@ def test_dump_without_mol_and_data(drude_pairs: NDArray[np.int64]) -> None:
     assert satellite_bond_pairs("d") == sorted_pairs(drude_pairs)
 
 
+@pytest.mark.parametrize("wrap", [0, 1])
 def test_wrapped_dump_without_mol_and_data_keeps_drudes_at_their_cores(
-    drude_pairs: NDArray[np.int64], write_file: WriteFile
+    drude_pairs: NDArray[np.int64], write_file: WriteFile, wrap: int
 ) -> None:
-    """Nothing can be wrapped, but no Drude is drawn across the box from its core.
+    """No Drude is drawn across the box from its core, wrapped or not.
 
     In frame 1 atom 1 is at x = 0.1 and its Drude at x = 29.8 in the wrapped file.
     """
     path = write_file("wrapped.lammpstrj", wrapped_dump())
-    load_lammps(str(path), object="d", quiet=1)
+    load_lammps(str(path), object="d", quiet=1, wrap=wrap)
     assert satellite_bond_pairs("d") == sorted_pairs(drude_pairs)
     for state, positions in enumerate(dump_positions(), start=1):
         reference = np.linalg.norm(
@@ -185,11 +186,18 @@ def test_wrapped_dump_without_mol_and_data_keeps_drudes_at_their_cores(
         assert pair_distances("d", drude_pairs, state) == pytest.approx(
             reference, abs=1e-4
         )
-    # The cores stay where the file has them.
     frame = next(read_frames(path))
     cores = ~satellite_mask(build_topology(frame).elements)
     shown = coordinates_by_id("d")
-    assert shown[cores] == pytest.approx(frame.positions()[cores], abs=1e-4)
+    if wrap:
+        # The molecules found from the guessed bonds are put together again.
+        bonds = read_data(DATA_FILE).bonds - 1
+        assert pair_distances("d", bonds) == pytest.approx(
+            file_distances(frame.positions(), bonds), abs=1e-4
+        )
+    else:
+        # The cores stay where the file has them.
+        assert shown[cores] == pytest.approx(frame.positions()[cores], abs=1e-4)
 
 
 def without_satellite_bonds(pairs: NDArray[np.int64]) -> str:

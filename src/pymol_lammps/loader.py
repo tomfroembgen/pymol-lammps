@@ -24,6 +24,7 @@ from pymol import cgo, cmd, importing
 from pymol_lammps import xyz
 from pymol_lammps.bonds import (
     bond_limits,
+    bonding_elements,
     cell_heights,
     guess_bonds,
     max_bond_limit,
@@ -128,8 +129,8 @@ def _can_wrap(molecules: Molecules | None, unwrapped: bool) -> bool:
     if molecules is None:
         if unwrapped:
             warnings.warn(
-                "no molecule IDs (dump column mol or a data file), so molecules "
-                "were not wrapped into the box",
+                "no molecule IDs (dump column mol, or molecule IDs in the data "
+                "file), so molecules were not wrapped into the box",
                 stacklevel=2,
             )
         return False
@@ -168,21 +169,24 @@ def _displayed(
 def _chempy_model(topology: Topology, positions: NDArray[Any]) -> Any:
     """Build a chempy model of the first frame, including bonds if known."""
     model = models.Indexed()
-    for i in range(len(topology.ids)):
+    # Python lists instead of NumPy arrays: indexing them per atom is much faster.
+    types = topology.types.tolist()
+    charges = None if topology.charges is None else topology.charges.tolist()
+    for i, coord in enumerate(positions.tolist()):
         atom = Atom()
-        atom.coord = positions[i].tolist()
+        atom.coord = coord
         atom.symbol = topology.elements[i]
         atom.name = topology.names[i]
         atom.resn = topology.residue_names[i]
         atom.resi = topology.residue_ids[i]
-        atom.numeric_type = int(topology.types[i])
-        atom.text_type = str(topology.types[i])
-        if topology.charges is not None:
-            atom.partial_charge = float(topology.charges[i])
+        atom.numeric_type = types[i]
+        atom.text_type = str(types[i])
+        if charges is not None:
+            atom.partial_charge = charges[i]
         model.add_atom(atom)
-    for i, j in topology.bonds if topology.bonds is not None else ():
+    for pair in topology.bonds.tolist() if topology.bonds is not None else ():
         bond = Bond()
-        bond.index = [int(i), int(j)]
+        bond.index = pair
         model.add_bond(bond)
     return model
 
@@ -282,6 +286,45 @@ def _cut_bonds(
     return periodic_bonds(coordinates, bonds, satellite, box)
 
 
+def _guess_dump_bonds(
+    positions: NDArray[np.float64],
+    topology: Topology,
+    satellite: NDArray[np.bool_],
+    box: Box,
+) -> NDArray[np.int64]:
+    """Guess the bonds of a dump without data file from its first frame.
+
+    The bonds are found with the minimum-image convention, so that bonds through
+    the periodic boundary are found as well; this is what lets the loader recognise
+    molecules cut by the boundary and periodic networks. With molecule IDs in the
+    dump, a guessed bond between two molecules is dropped, because the dump says
+    that they are separate, and the bond would become long when the two molecules
+    are wrapped one by one. The bonds of Drude particles and virtual sites are kept.
+
+    Parameters
+    ----------
+    positions : NDArray[np.float64]
+        Cartesian positions of the first frame in Angstrom, shape (n_atoms, 3).
+    topology : Topology
+        Per-atom properties of the dump.
+    satellite : NDArray[np.bool_]
+        Which atoms are Drude particles or virtual sites, shape (n_atoms,).
+    box : Box
+        Box of the first frame.
+
+    Returns
+    -------
+    NDArray[np.int64]
+        Bonded atom pairs, shape (n_bonds, 2).
+    """
+    bonds = guess_bonds(positions, bonding_elements(topology.elements), box)
+    index = topology.molecule_index()
+    if index is None:
+        return bonds
+    same = index[bonds[:, 0]] == index[bonds[:, 1]]
+    return bonds[same | satellite[bonds[:, 0]] | satellite[bonds[:, 1]]]
+
+
 def _load_states(
     name: str,
     states: Iterator[tuple[NDArray[np.float64], Box | None]],
@@ -363,14 +406,20 @@ def load_lammps(
     frame is the one in the dump (``ITEM: BOX BOUNDS``).
 
     By default, whole molecules are wrapped into the box of each frame (by centre
-    of geometry; molecule IDs from the dump's ``mol`` column or the data file).
+    of geometry; molecule IDs from the dump's ``mol`` column or the data file,
+    without either the groups of atoms connected by the guessed bonds).
     With ``wrap=0``, coordinates are kept as in the dump, unwrapped if it has
     xu yu zu or image flags ix iy iz. ``lammps_wrap`` switches this after loading.
 
     Without a data file, elements come from the dump's ``element`` or ``mass``
-    column, and bonds are guessed from distances in the first frame. With a data
-    file, masses, molecule IDs, charges, names and bonds are read from it. The
-    atom type is stored as ``numeric_type`` and ``text_type``.
+    column, and bonds are guessed from the first frame as in ``load_xyz``: two
+    atoms are bonded if their minimum-image distance is below the sum of their
+    covalent radii plus 0.4 A, so bonds through the box boundary are found too.
+    Element labels are reduced to element symbols (``CL`` is Cl, ``OW`` is O); a
+    label that is no element is bonded like carbon, with a warning. With a ``mol``
+    column, a guessed bond between two molecules is dropped. With a data file,
+    masses, molecule IDs, charges, names and bonds are read from it. The atom type
+    is stored as ``numeric_type`` and ``text_type``.
 
     Drude particles of polarizable force fields are found automatically: element
     label ``D`` (dump ``element`` column or ``elements=``), or, when the elements
@@ -394,7 +443,8 @@ def load_lammps(
     Bonds longer than half of the smallest box height cannot be real bonds: they
     connect periodic images (a graphene sheet, a crystal). They are removed from the
     display, in every frame, and their number is printed; bonds of Drudes and
-    virtual sites are never removed. (With ``wrap=0`` and a dump of wrapped
+    virtual sites are never removed. This holds for bonds from a data file and for
+    guessed bonds alike. (With ``wrap=0`` and a dump of wrapped
     coordinates they are kept, because molecules cut by the boundary are shown as
     they are.) A molecule that is bonded through the boundary and has wrapped
     coordinates cannot be reassembled, so its atoms are wrapped one by one in the
@@ -463,7 +513,9 @@ def load_lammps(
         first_positions = first.positions()
         satellite = satellite_mask(topology.elements)
         bonds = topology.bonds
-        if bonds is not None:
+        if bonds is None:
+            bonds = _guess_dump_bonds(first_positions, topology, satellite, first.box)
+        else:
             # A satellite without a bond in the data file (an M site held by fix
             # rigid, for example) is bonded to its nearest host like without one.
             unbonded = satellite.copy()
@@ -473,24 +525,19 @@ def load_lammps(
                     first_positions, topology.elements, first.box, only=unbonded
                 )
                 bonds = np.concatenate([bonds, extra])
-                topology = replace(topology, bonds=bonds)
-        satellites = satellite_hosts(
-            bonds
-            if bonds is not None
-            else satellite_bonds(first_positions, topology.elements, first.box),
-            topology.elements,
-        )
+        topology = replace(topology, bonds=bonds)
+        satellites = satellite_hosts(bonds, topology.elements)
         if not int(quiet):
             _warn_if_deuterium(
                 first_positions, satellites, topology.elements, first.box
             )
         index = topology.molecule_index()
-        molecules = (
-            None
-            if index is None
-            else Molecules.from_bonds(index, bonds if bonds is not None else satellites)
-        )
-        if molecules is not None and bonds is not None and not first.unwrapped:
+        if index is None and data_file is None:
+            # Without molecule IDs, the molecules are the groups of atoms connected
+            # by the guessed bonds, as for xyz files.
+            index = molecule_index(len(topology.ids), bonds)
+        molecules = None if index is None else Molecules.from_bonds(index, bonds)
+        if molecules is not None and not first.unwrapped:
             # Wrapped coordinates: after reassembly, a network bonded through the
             # boundary still has a bond longer than half the cell; no bond of a real
             # molecule is. Unwrapped coordinates need no reassembly: a sheet stays
@@ -526,19 +573,12 @@ def load_lammps(
         cut = _cut_bonds(coordinates, bonds, satellite, first.box, check)
 
         _self.delete(f"{name} {name}_box {name}_drude")
-        model = _chempy_model(
-            replace(topology, bonds=None if bonds is None else bonds[~cut]),
-            coordinates,
-        )
+        model = _chempy_model(replace(topology, bonds=bonds[~cut]), coordinates)
         _self.load_model(model, name, 1)
         ids = topology.ids.tolist()
         # chempy cannot carry atom IDs; PyMOL numbers them from 0 on loading.
         _self.alter(name, "ID = ids[rank]", space={"ids": ids})
-        if bonds is None:
-            _self.rebond(name, 1, pbc=0)
-        _finish_satellites(
-            name, ids, satellite, None if bonds is not None else satellites, _self
-        )
+        _finish_satellites(name, ids, satellite, None, _self)
         _set_box(name, first.box, 1, show_box, _self)
 
         trajectory = _Trajectory(

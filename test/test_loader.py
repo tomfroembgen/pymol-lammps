@@ -139,10 +139,58 @@ def test_lammps_wrap_needs_a_loaded_object() -> None:
 def test_no_molecule_ids_warns_for_unwrapped_dump(
     write_file: WriteFile, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """A data file without molecule IDs (atom style atomic) gives nothing to wrap."""
+    rows = [[1, 1, 6.0, 0, 0], [2, 1, 7.0, 0, 0]]
+    path = write_file("t.lammpstrj", frame_text("id type xu yu zu", rows))
+    data = write_file(
+        "atomic.data",
+        "atomic\n\n2 atoms\n1 atom types\n-5 5 xlo xhi\n-5 5 ylo yhi\n-5 5 zlo zhi\n"
+        "\nMasses\n\n1 12.011\n\nAtoms # atomic\n\n1 1 6 0 0\n2 1 7 0 0\n",
+    )
+
+    load_lammps(str(path), data=str(data))
+
+    assert "were not wrapped" in capsys.readouterr().out
+    assert box_extent("t", 1) == (6.0, 7.0)
+
+
+def test_dump_without_molecule_ids_is_wrapped_by_guessed_molecules(
+    write_file: WriteFile, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without a data file, the bonded pair is one molecule, wrapped as a whole."""
     rows = [[1, 1, 6.0, 0, 0], [2, 1, 7.0, 0, 0]]
     path = write_file("t.lammpstrj", frame_text("id type xu yu zu", rows))
 
     load_lammps(str(path), elements="C")
 
-    assert "were not wrapped" in capsys.readouterr().out
-    assert box_extent("t", 1) == (6.0, 7.0)
+    assert "were not wrapped" not in capsys.readouterr().out
+    assert box_extent("t", 1) == (-4.0, -3.0)
+    assert len(cmd.get_model("t").bond) == 1
+
+
+@pytest.mark.parametrize(("columns", "expected"), [("id type", 1), ("id mol type", 0)])
+def test_guessed_bond_between_two_molecules_is_dropped(
+    write_file: WriteFile, columns: str, expected: int
+) -> None:
+    """Two carbons 1.5 A apart are bonded, unless the dump puts them in two molecules."""
+    rows: list[list[object]] = [[1, 1, 0.0, 0, 0], [2, 1, 1.5, 0, 0]]
+    if "mol" in columns:
+        rows = [[*row[:1], row[0], *row[1:]] for row in rows]
+    path = write_file("pair.lammpstrj", frame_text(f"{columns} x y z", rows))
+
+    load_lammps(str(path), elements="C", quiet=1)
+
+    assert n_bonds("pair") == expected
+
+
+def test_unknown_element_label_is_bonded_like_carbon(
+    write_file: WriteFile, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rows = [[1, 1, "X", 0.0, 0, 0], [2, 1, "X", 1.5, 0, 0]]
+    path = write_file("labels.lammpstrj", frame_text("id type element x y z", rows))
+
+    load_lammps(str(path))
+
+    assert "no covalent radius for the element labels ['X']" in capsys.readouterr().out
+    assert n_bonds("labels") == 1
+    assert atoms("labels")[0][2] == "X"

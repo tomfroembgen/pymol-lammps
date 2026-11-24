@@ -15,9 +15,8 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
-from pymol_lammps.drude import SATELLITES
 from pymol_lammps.dump import Box, open_text
-from pymol_lammps.elements import ELEMENT_MASSES
+from pymol_lammps.elements import element_symbol
 
 _LATTICE = re.compile(r'Lattice\s*=\s*"([^"]*)"', re.IGNORECASE)
 _ORIGIN = re.compile(r'Origin\s*=\s*"([^"]*)"', re.IGNORECASE)
@@ -46,13 +45,8 @@ class XyzFrame:
 def normalise_element(label: str) -> str:
     """Convert an xyz atom label such as ``"c1"`` or ``"CL"`` to an element symbol.
 
-    Digits and other trailing characters are dropped, then the capitalisation is
-    fixed. A two-letter label that is no element falls back to its first letter
-    (``"HW"`` becomes ``"H"``). The labels ``D`` (Drude particle) and ``M`` (virtual
-    site of a water model) are not elements and are kept as ``"D"`` and ``"M"``,
-    independent of case; this applies to the bare letter only (``"MG"`` is still
-    magnesium and ``"MW"`` is unknown). Digits are dropped first, so ``"D1"`` is a
-    Drude.
+    The rules are those of ``pymol_lammps.elements.element_symbol``; an xyz file
+    must give an element for every atom.
 
     Parameters
     ----------
@@ -69,14 +63,10 @@ def normalise_element(label: str) -> str:
     ValueError
         If the label does not start with a known element.
     """
-    letters = re.match(r"[A-Za-z]+", label)
-    word = letters.group().capitalize() if letters else ""
-    if word.upper() in SATELLITES:
-        return word.upper()
-    for candidate in (word[:2], word[:1]):
-        if candidate in ELEMENT_MASSES:
-            return candidate
-    raise ValueError(f"unknown element label {label!r} in xyz file")
+    symbol = element_symbol(label)
+    if not symbol:
+        raise ValueError(f"unknown element label {label!r} in xyz file")
+    return symbol
 
 
 def _parse_box(comment: str, path: Path, index: int) -> Box | None:

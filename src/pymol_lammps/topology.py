@@ -11,7 +11,8 @@ Each property is taken from the most specific source available:
 - residue name: data-file atom comment (fftool writes the species name there)
 - residue number: dump ``mol`` column > data-file molecule ID
 - charge: dump ``q`` column > data-file charge
-- bonds: data file; without a data file they are left to distance-based guessing
+- bonds: data file; without a data file the loader guesses them from distances
+  (``pymol_lammps.bonds.guess_bonds``)
 """
 
 import warnings
@@ -53,7 +54,7 @@ class Topology:
         Partial charges, None if neither dump nor data file has them.
     bonds : NDArray[np.int64] | None
         Bonded atom pairs as indices into ``ids``, shape (n_bonds, 2). None means
-        no bond information is available and bonds should be guessed.
+        no data file was given, and the loader guesses the bonds.
     """
 
     ids: NDArray[np.int64]

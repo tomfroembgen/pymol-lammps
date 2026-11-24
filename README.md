@@ -90,7 +90,9 @@ only every n-th frame instead: `load_lammps traj.lammpstrj, interval=10`.
 By default, every molecule is shifted by whole box vectors so that its centre of
 geometry lies inside the box of that frame. Molecules stay intact; this also
 works for triclinic boxes. Molecules are taken from the LAMMPS molecule IDs (dump
-column `mol` or the data file).
+column `mol` or the data file). If neither is available, a molecule is a group of
+atoms that are connected by bonds, with the bonds guessed from the first frame (see
+[The data file](#the-data-file-why-data-matters)).
 
 ```
 lammps_wrap traj, 0       # back to the coordinates of the dump (e.g. to follow diffusion)
@@ -103,8 +105,10 @@ representations and colours. A molecule that crosses the boundary jumps to the
 opposite side between two frames; this is expected for wrapped coordinates.
 
 If the dump has wrapped coordinates without image flags, molecules cut by the
-boundary are first reassembled by walking along the bonds. This needs the bonds
-from a data file for molecules longer than half the box (peptides, polymers).
+boundary are first reassembled by walking along the bonds. The bonds come from the
+data file or, without one, are guessed from the first frame. Guessed bonds are
+reliable only if the elements are known (see
+[The data file](#the-data-file-why-data-matters)).
 
 
 ## Loading xyz trajectories
@@ -234,8 +238,8 @@ M site (the nearest oxygen for an M site). Drude particles and M sites travel wi
 their molecule when it is wrapped. In addition, every Drude particle and M site is
 moved in every frame to the periodic image next to its host, also with `wrap=0`. A
 particle is therefore never shown on the other side of the box from its host, even
-if the dump has wrapped coordinates and the molecule cannot be reassembled (no
-molecule IDs, or a molecule longer than half the box without a data file).
+if the dump has wrapped coordinates and the molecule is not reassembled, for example
+with `wrap=0` or with a data file that has no molecule IDs.
 
 **Display style.** A Drude particle lies very close to its host. In the first frame
 of a simulation of an ionic liquid on graphene with 3036 Drude particles, the median
@@ -314,16 +318,19 @@ spheres and sticks, and the solid fallback behaves in the same way.
 
 If a molecule is bonded through the periodic boundary to its own periodic image (a
 graphene sheet, an infinite chain or a crystal; we call it a *periodic network*),
-the data file contains bonds between atoms and the periodic images of their
-neighbours. PyMOL draws them as sticks through the whole box. After loading, bonds
-longer than half of the smallest height of the box are therefore removed from the
-display, and the summary line says how many (150 for the two graphene sheets of the
-ionic-liquid example, whose dump has unwrapped coordinates). No real bond is that
-long, and the bonds of Drude particles and M sites are never removed. `load_xyz`
-does the same for periodic networks that it finds. With `wrap=0` and a file of
-wrapped coordinates, all bonds are kept, because molecules cut by the boundary are
-then shown as they are in the file. `lammps_wrap` finds the periodic bonds again for
-the new coordinates, so switching between the two views removes and restores them.
+its bonds include bonds between atoms and the periodic images of their neighbours.
+This holds for the bonds of a data file and for the bonds that the loaders guess
+without one, because the guess uses the minimum-image distance. PyMOL draws these
+bonds as sticks through the whole box. After loading, bonds longer than half of the
+smallest height of the box are therefore removed from the display, and the summary
+line says how many (150 for the five graphene layers of the ionic-liquid example,
+whose dump has unwrapped coordinates, with or without the data file). No real bond
+is that long, and the bonds of Drude particles and M sites are never removed. The
+same rules apply to `load_lammps` with and without a data file and to `load_xyz`.
+With `wrap=0` and a file of wrapped coordinates, all bonds are kept, because
+molecules cut by the boundary are then shown as they are in the file. `lammps_wrap`
+finds the periodic bonds again for the new coordinates, so switching between the
+two views removes and restores them.
 
 PyMOL stores bonds per object, not per frame, so a bond removed in one frame is
 missing in all frames. The loader therefore keeps the set of removed bonds the same
@@ -337,6 +344,11 @@ frame, and the whole network is shifted by box vectors so that its centre stays 
 the box. The network is therefore cut at the same bonds in every frame. This needs
 atoms that move by less than half a box between two loaded frames, which holds for
 any usual dump interval.
+
+The warning counts the molecules that form networks. Without a data file and without
+a `mol` column, every connected network counts on its own, so for the ionic-liquid
+example the warning reports five networks (the five graphene layers), whereas the
+data file puts all layers into one molecule. The display is the same in both cases.
 
 Only the centre of the network is kept in the box, not each of its atoms. A network
 that drifts through the box is shown as a continuous piece that follows its own
@@ -367,10 +379,23 @@ the starting data file of the run is fine. The dump may contain only a subset of
 the atoms (a dump of one group).
 
 Without a data file, elements come from an `element` or `mass` column in the dump
-if present (otherwise all atoms are shown as carbon, with a warning), and bonds
-are guessed from distances in the first frame. For the ionic liquid
-[C2C1im][NTf2], for example, distance guessing finds 400 "bonds" instead of the
-real 330.
+if present (otherwise all atoms are shown as carbon, with a warning). The bonds are
+then guessed from the first frame in the same way as for xyz files: two atoms are
+bonded if their distance, measured with the minimum-image convention, is smaller
+than the sum of their covalent radii plus 0.4 A. Because of the minimum image,
+molecules cut by the box boundary and periodic networks are recognised as with a
+data file. Element labels such as `CL` or `OW` are read as Cl and O, and a label
+that does not start with an element symbol is bonded like carbon, with a warning.
+If the dump has a `mol` column, a guessed bond between two molecules is dropped,
+because the molecule IDs say that the molecules are separate. Without a `mol`
+column, a molecule is a group of atoms connected by the guessed bonds.
+
+The guess is only as good as the elements. With an `element` column, the guessed
+bonds were exactly the bonds of the data file for the three systems we tested: an
+ionic liquid (9945 bonds), the same ionic liquid with water (9954 bonds) and an
+ionic liquid on five graphene layers (9216 bonds, of which 150 pass through the box
+boundary). Without element information every atom is treated as carbon, and the
+guess finds 12325 bonds instead of 9954 for the ionic liquid with water.
 
 
 ## Preparing the LAMMPS run
@@ -467,8 +492,8 @@ select first100, ID 1-100       # LAMMPS atom IDs
 |---|---|
 | `load_lammps` or `load_xyz` is an unknown command | the `.pymolrc` block did not run; check the path in it and restart PyMOL |
 | warning "no element known for atom types ..." | give `data=` or `elements=` |
-| long bonds across the box | bonds between periodic images are removed after loading (see [Periodic bonds](#periodic-bonds)); other long bonds mean molecules could not be reassembled: with `wrap=0` and a wrapped dump, or a molecule longer than half the box without a data file. Dump `xu yu zu` (or add `ix iy iz`), or give `data=` |
-| warning "molecules were not wrapped" | no molecule IDs: dump the `mol` column or give `data=` |
+| long bonds across the box | bonds between periodic images are removed after loading (see [Periodic bonds](#periodic-bonds)); other long bonds mean that molecules were not reassembled, for example with `wrap=0` and a wrapped dump. Dump `xu yu zu` (or add `ix iy iz`), or wrap with `lammps_wrap object` |
+| warning "molecules were not wrapped" | the data file has no molecule IDs (atom style `atomic` or `charge`): dump the `mol` column |
 | molecules jump between frames | they cross the boundary while wrapping is on; `lammps_wrap object, 0` shows continuous paths |
 | `resn c2c1im+` selects nothing | `+` separates list items in PyMOL selections; use `resn c2c1im*` |
 | "Selector-Error" or "cannot find object" | the object name is a PyMOL keyword (e.g. `elem`, `name`); pass `object=...` |

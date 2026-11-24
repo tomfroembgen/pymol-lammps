@@ -272,3 +272,73 @@ def test_triclinic_ring_through_the_skewed_boundary(
             i, j = bond.index
             assert np.linalg.norm(shown[i] - shown[j]) == pytest.approx(1.5, abs=1e-3)
             assert np.linalg.norm(shown[i] - shown[j]) < half
+
+
+def ring_frame_with_elements(columns: str, step: int, shift: float) -> str:
+    """Return a wrapped frame of the ring with an ``element`` column (no data file)."""
+    rows = []
+    for i, x in enumerate([*CORE_X, DRUDE_X]):
+        row: list[object] = [i + 1, 1 if i < 6 else 2, "C" if i < 6 else "D"]
+        row += [(x + shift) % BOX, 4.5, 4.5]
+        if "mol" in columns:
+            row.insert(1, 1)
+        rows.append(row)
+    return frame_text(columns, rows, step, BOUNDS)
+
+
+RING_BONDS = {(1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (1, 6), (1, 7)}
+
+
+@pytest.mark.parametrize(
+    "columns", ["id type element x y z", "id mol type element x y z"]
+)
+@pytest.mark.parametrize("stop", [1, 3, 6])
+def test_wrapped_ring_without_data_file_is_cut_at_the_same_bond(
+    write_file: WriteFile,
+    capsys: pytest.CaptureFixture[str],
+    columns: str,
+    stop: int,
+) -> None:
+    """Without data file, the guessed bonds find the ring through the boundary.
+
+    The ring drifts by 1.6 A per frame through the boundary. Only the bond that is
+    cut in frame 1 is removed, whatever the number of frames, and no bond is
+    drawn through the box in any frame.
+    """
+    shifts = [1.6 * k for k in range(6)]
+    text = "".join(
+        ring_frame_with_elements(columns, k, s) for k, s in enumerate(shifts)
+    )
+    path = str(write_file("ring.lammpstrj", text))
+    load_lammps(path, object="r", stop=stop)
+    out = capsys.readouterr().out
+    assert "bonded through the box boundary" in out
+    assert "1 periodic bond removed" in out
+    assert bond_pairs("r") == RING_BONDS - {(1, 6)}
+    for state in range(1, stop + 1):
+        shown = coordinates_by_id("r", state)
+        for i, j in bond_pairs("r"):
+            assert np.linalg.norm(shown[i] - shown[j]) < BOX / 2
+        assert np.linalg.norm(shown[1] - shown[7]) == pytest.approx(0.5, abs=1e-4)
+
+
+def test_lammps_wrap_without_data_file_restores_the_loaded_state(
+    write_file: WriteFile, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """wrap=0 shows every guessed bond, as for a data file; wrapping cuts one."""
+    columns = "id type element x y z"
+    text = ring_frame_with_elements(columns, 0, 0.0)
+    text += ring_frame_with_elements(columns, 1, 1.6)
+    path = str(write_file("ring.lammpstrj", text))
+    load_lammps(path, object="loaded", quiet=1)
+    load_lammps(path, object="r", wrap=0, quiet=1)
+    assert bond_pairs("r") == RING_BONDS
+    lammps_wrap("r", 1)
+    assert "1 periodic bond removed" in capsys.readouterr().out
+    assert bond_pairs("r") == bond_pairs("loaded") == RING_BONDS - {(1, 6)}
+    for state in (1, 2):
+        assert np.asarray(cmd.get_coords("r", state)) == pytest.approx(
+            np.asarray(cmd.get_coords("loaded", state)), abs=1e-4
+        )
+    lammps_wrap("r", 0, quiet=1)
+    assert bond_pairs("r") == RING_BONDS

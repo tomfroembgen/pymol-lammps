@@ -1,8 +1,14 @@
 """Tests for bond and molecule guessing."""
 
 import numpy as np
+import pytest
 
-from pymol_lammps.bonds import COVALENT_RADII, guess_bonds, molecule_index
+from pymol_lammps.bonds import (
+    COVALENT_RADII,
+    bonding_elements,
+    guess_bonds,
+    molecule_index,
+)
 from pymol_lammps.dump import Box
 from pymol_lammps.elements import ELEMENT_MASSES
 
@@ -93,3 +99,55 @@ def test_ions_get_no_bonds() -> None:
 
     assert len(set(index.tolist())) == 8
     assert index[0] != index[2]
+
+
+def brute_force_bonds(
+    positions: np.ndarray, elements: list[str], box: Box | None
+) -> list[list[int]]:
+    """Return the bonds by comparing every pair (minimum image by rounding)."""
+    radii = np.array([COVALENT_RADII[e] for e in elements])
+    delta = positions[None, :, :] - positions[:, None, :]
+    if box is not None:
+        fractional = delta @ np.linalg.inv(box.matrix).T
+        delta = (fractional - np.round(fractional)) @ box.matrix.T
+    distance = np.linalg.norm(delta, axis=2)
+    bonded = (distance < radii[:, None] + radii[None, :] + 0.4) & (distance > 0.4)
+    i, j = np.nonzero(np.triu(bonded, 1))
+    return np.column_stack([i, j]).tolist()
+
+
+@pytest.mark.parametrize("length", [4.5, 6.5, 9.0, 20.0])
+@pytest.mark.parametrize("periodic", [True, False])
+def test_cell_list_finds_the_same_bonds_as_all_pairs(
+    length: float, periodic: bool
+) -> None:
+    """Random C/H atoms; the boxes have two, three, four and ten cells per axis."""
+    rng = np.random.default_rng(int(length * 10))
+    n_atoms = int(0.1 * length**3)
+    positions = rng.uniform(0, length, (n_atoms, 3))
+    elements = rng.choice(["C", "H"], n_atoms).tolist()
+    box = Box.from_cell_parameters(length) if periodic else None
+
+    bonds = guess_bonds(positions, elements, box)
+
+    assert bonds.tolist() == brute_force_bonds(positions, elements, box)
+
+
+def test_molecules_of_a_long_shuffled_chain() -> None:
+    """A chain given in random bond order needs several rounds to join."""
+    rng = np.random.default_rng(3)
+    chain = np.column_stack([np.arange(199), np.arange(1, 200)])
+    bonds = chain[rng.permutation(199)][:, ::-1]
+
+    index = molecule_index(201, bonds)
+
+    assert index.tolist() == [0] * 200 + [1]
+
+
+def test_bonding_elements_reads_labels_and_warns_for_unknown_ones() -> None:
+    labels = ["C", "CL", "OW", "D", "M", "X1"]
+
+    with pytest.warns(UserWarning, match=r"\['X1'\]"):
+        symbols = bonding_elements(labels)
+
+    assert symbols == ["C", "Cl", "O", "D", "M", "C"]

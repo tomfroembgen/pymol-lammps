@@ -98,3 +98,20 @@ def test_reassembly_order_follows_bonds() -> None:
     np.testing.assert_array_equal(plan.anchor, [0, 0, 1, 0])
     np.testing.assert_array_equal(plan.levels[0], [1, 3])
     np.testing.assert_array_equal(plan.levels[1], [2])
+
+
+def test_anchor_is_the_first_atom_that_reaches_it() -> None:
+    """In a ring, the far atom is reached from two sides; the walk order decides.
+
+    Molecule 0 is the ring 0-1-2-3-0 (atom 2 is reached from 1 and from 3); molecule
+    1 is the chain 4-5 given as bond (5, 4); bond 3-4 joins two molecules and is
+    not followed.
+    """
+    bonds = np.array([[0, 3], [3, 4], [2, 3], [0, 1], [1, 2], [5, 4]])
+
+    plan = Molecules.from_bonds(np.array([0, 0, 0, 0, 1, 1]), bonds)
+
+    # Atom 0 reaches 3 before 1 (bond order), so 3 is walked first and anchors 2.
+    np.testing.assert_array_equal(plan.anchor, [0, 0, 3, 0, 4, 4])
+    np.testing.assert_array_equal(plan.levels[0], [1, 3, 5])
+    np.testing.assert_array_equal(plan.levels[1], [2])

@@ -4,9 +4,17 @@ LAMMPS stores masses, not elements. Matching a mass against standard atomic weig
 recovers the element for all-atom force fields. The tolerance is tight on purpose:
 united-atom sites such as CH2 (14.027) lie close to real elements (N, 14.007) and must
 stay unresolved instead of being assigned the wrong element.
+
+Element labels written by programs (xyz files, the ``element`` column of a dump) are
+free text, so ``element_symbol`` reduces a label such as ``"CL"`` or ``"OW"`` to the
+element symbol.
 """
 
+import re
+
 import numpy as np
+
+from pymol_lammps.drude import SATELLITES
 
 # Conventional standard atomic weights (IUPAC, abridged to 3 decimals), H to Ba plus
 # the heavier elements common in simulations.
@@ -50,3 +58,35 @@ def element_from_mass(mass: float) -> str:
     deviation = np.abs(_MASSES - mass)
     best = int(np.argmin(deviation))
     return str(_SYMBOLS[best]) if deviation[best] <= MASS_TOLERANCE else ""
+
+
+def element_symbol(label: str) -> str:
+    """Convert an atom label such as ``"c1"`` or ``"CL"`` to an element symbol.
+
+    Digits and other trailing characters are dropped, then the capitalisation is
+    fixed. A two-letter label that is no element falls back to its first letter
+    (``"HW"`` becomes ``"H"``). The labels ``D`` (Drude particle) and ``M`` (virtual
+    site of a water model) are not elements and are kept as ``"D"`` and ``"M"``,
+    independent of case; this applies to the bare letter only (``"MG"`` is still
+    magnesium and ``"MW"`` is unknown). Digits are dropped first, so ``"D1"`` is a
+    Drude.
+
+    Parameters
+    ----------
+    label : str
+        Atom label.
+
+    Returns
+    -------
+    str
+        Element symbol, or an empty string if the label does not start with a
+        known element.
+    """
+    letters = re.match(r"[A-Za-z]+", label)
+    word = letters.group().capitalize() if letters else ""
+    if word.upper() in SATELLITES:
+        return word.upper()
+    for candidate in (word[:2], word[:1]):
+        if candidate in ELEMENT_MASSES:
+            return candidate
+    return ""

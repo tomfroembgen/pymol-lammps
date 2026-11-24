@@ -24,7 +24,6 @@ their host atom (``place_satellites``), so that they are never shown on the othe
 side of the box.
 """
 
-from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -84,24 +83,42 @@ class Molecules:
             Membership and reassembly order.
         """
         n_atoms = len(index)
-        neighbours: list[list[int]] = [[] for _ in range(n_atoms)]
-        for i, j in bonds if bonds is not None else ():
-            neighbours[i].append(int(j))
-            neighbours[j].append(int(i))
+        if bonds is None:
+            bonds = np.empty((0, 2), dtype=np.int64)
+        # Both directions of every bond within a molecule, in bond order, grouped
+        # by the first atom: the neighbours of atom a are
+        # ``to[start[a]:start[a + 1]]``.
+        source = bonds.ravel()
+        target = bonds[:, ::-1].ravel()
+        inside = index[source] == index[target]
+        source, target = source[inside], target[inside]
+        to = target[np.argsort(source, kind="stable")]
+        degree = np.bincount(source, minlength=n_atoms)
+        start = np.cumsum(degree) - degree
 
         _, roots = np.unique(index, return_index=True)
         anchor = np.arange(n_atoms)
         depth = np.full(n_atoms, -1)
-        for root in roots:
-            depth[root] = 0
-            queue = deque([int(root)])
-            while queue:
-                atom = queue.popleft()
-                for other in neighbours[atom]:
-                    if depth[other] < 0 and index[other] == index[atom]:
-                        depth[other] = depth[atom] + 1
-                        anchor[other] = atom
-                        queue.append(other)
+        depth[roots] = 0
+        # Breadth-first walk from the first atom of every molecule, one distance
+        # (in bonds) at a time. An atom found from several atoms of the previous
+        # distance takes the first of them in the order of the walk as its anchor,
+        # as a walk with a queue would.
+        front = roots
+        while len(front):
+            number = degree[front]
+            offsets = np.arange(number.sum()) - np.repeat(
+                np.cumsum(number) - number, number
+            )
+            parent = np.repeat(front, number)
+            child = to[np.repeat(start[front], number) + offsets]
+            new = depth[child] < 0
+            parent, child = parent[new], child[new]
+            _, first = np.unique(child, return_index=True)
+            first.sort()
+            front = child[first]
+            anchor[front] = parent[first]
+            depth[front] = depth[parent[first]] + 1
 
         # Atoms without a bond path to the first atom of their molecule.
         loose = depth < 0
