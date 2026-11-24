@@ -99,7 +99,8 @@ def _elements(
     Drude particles and virtual sites get the pseudo-elements ``D`` and ``M``. The
     mass of a core atom in a Drude force field is reduced by the Drude mass
     (N is 13.607 instead of 14.007), so an unresolved mass is tried again with the
-    Drude masses added.
+    Drude masses added. These come from the Drudes in the dump and from the Drude
+    types of the data file, so that a dump of the cores only is resolved as well.
 
     Raises
     ------
@@ -124,7 +125,14 @@ def _elements(
         # Without any mass, "massless" must not be concluded from a placeholder.
         masses = np.full(len(types), np.nan)
     sites = mass_sites(types, masses, drude)
-    drude_masses = np.unique(masses[sites == "D"])
+    drude_masses = masses[sites == "D"]
+    if data is not None:
+        # A dump of the cores only has no Drudes; their mass is in the data file.
+        type_ids = np.array(sorted(data.type_masses), dtype=np.int64)
+        type_masses = np.array([data.type_masses[t] for t in type_ids.tolist()])
+        data_sites = mass_sites(type_ids, type_masses, drude)
+        drude_masses = np.concatenate([drude_masses, type_masses[data_sites == "D"]])
+    drude_masses = np.unique(drude_masses)
 
     def resolve(mass: float) -> str:
         for shift in (0.0, *drude_masses):
@@ -139,10 +147,10 @@ def _elements(
 
     unresolved = sorted({int(t) for t, element in zip(types, resolved) if not element})
     if unresolved:
+        remedy = "the elements" if data is not None else "a data file, or the elements"
         warnings.warn(
             f"no element known for atom types {unresolved}; shown as "
-            f"{FALLBACK_ELEMENT}. Pass a data file with masses, or the elements "
-            "per type (e.g. elements=C H O N)",
+            f"{FALLBACK_ELEMENT}. Give {remedy} per type (e.g. elements=C H O N)",
             stacklevel=3,
         )
     return elements

@@ -221,6 +221,66 @@ def test_lammps_wrap_refreshes_the_dashes(
     assert refreshed == ["d"]
 
 
+def test_dashes_survive_a_deleted_selection(loaded: str) -> None:
+    """The dashes remember their atoms, not the name of the user's selection."""
+    cmd.select("mysel", "d and resi 1-3")
+    drude_style("mysel", quiet=1)
+    styled = cmd.count_atoms("mysel and elem D+M")
+    cmd.delete("mysel")
+    lammps_wrap("d", 0, quiet=1)
+    for state in (1, 2, 3):
+        assert len(dash_points("d_drude", state)) == styled
+        assert ends_match_atoms(state)
+
+
+def test_dashes_of_several_calls_add_up(loaded: str) -> None:
+    drude_style("d and resi 1", quiet=1)
+    drude_style("d and resi 2", quiet=1)
+    expected = cmd.count_atoms("d and resi 1+2 and elem D+M")
+    assert len(dash_points("d_drude", 1)) == expected
+    # Solid bonds for molecule 1 take its dashes away, not those of molecule 2.
+    drude_style("d and resi 1", dashed=0, quiet=1)
+    assert len(dash_points("d_drude", 1)) == cmd.count_atoms(
+        "d and resi 2 and elem D+M"
+    )
+
+
+def test_hidden_molecules_stay_hidden(loaded: str) -> None:
+    cmd.hide("everything", "d and resn tf2N-")
+    hidden = "d and resn tf2N-"
+    drude_style("d", quiet=1)
+    assert cmd.count_atoms(f"{hidden} and rep spheres+sticks+lines") == 0
+    shown = "d and not resn tf2N- and elem D+M"
+    assert cmd.count_atoms(f"{shown} and rep spheres") == cmd.count_atoms(shown)
+    assert len(dash_points("d_drude", 1)) == cmd.count_atoms(shown)
+    drude_style("d", dashed=0, quiet=1)
+    assert cmd.count_atoms(f"{hidden} and rep spheres+sticks+lines") == 0
+
+
+def test_lammps_wrap_leaves_the_object_unchanged_on_a_read_error(
+    write_file: Any,
+) -> None:
+    """A file that became unreadable after loading changes no state."""
+    # All atoms one box length along x, so that wrapping moves every molecule.
+    lines = Path(DUMP).read_text().splitlines()
+    for k, line in enumerate(lines):
+        fields = line.split()
+        if len(fields) == 6 and not line.startswith("ITEM"):
+            fields[3] = f"{float(fields[3]) + 30.0:.4f}"
+            lines[k] = " ".join(fields)
+    path = write_file("drude.lammpstrj", "\n".join(lines) + "\n")
+    load_lammps(str(path), data=DATA_FILE, object="d", quiet=1)
+    before = [np.asarray(cmd.get_coords("d", state)) for state in (1, 2, 3)]
+    # Spoil one coordinate in the last frame.
+    fields = lines[-1].split()
+    lines[-1] = " ".join([*fields[:3], "unreadable", *fields[4:]])
+    path.write_text("\n".join(lines) + "\n")
+    with pytest.raises(pymol.CmdException):
+        lammps_wrap("d", 0, quiet=1)
+    for state, coordinates in enumerate(before, start=1):
+        assert np.asarray(cmd.get_coords("d", state)) == pytest.approx(coordinates)
+
+
 REAL = Path.home() / "test/pymol-lammps-drude/db-case2-rep2"
 
 

@@ -8,6 +8,7 @@ face. Atoms are numbered by molecule, so atom i of the fixtures has index i - 1 
 the arrays below.
 """
 
+import itertools
 import re
 import warnings
 from collections.abc import Callable, Iterator
@@ -16,6 +17,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from conftest import frame_text
 from numpy.typing import NDArray
 
 from pymol_lammps.bonds import guess_bonds, satellite_bonds
@@ -111,6 +113,20 @@ def cores_only(text: str) -> str:
         rows = [r for r in rows if r.split()[2] not in ("D", "M")]
         head[2] = str(len(rows))
         out += ["ITEM: TIMESTEP", *head, *rows]
+    return "\n".join(out) + "\n"
+
+
+def wrapped_dump() -> str:
+    """Return the fixture dump with wrapped coordinates ``x y z`` (no image flags)."""
+    out = []
+    for line in (DATA / "drude.lammpstrj").read_text().splitlines():
+        if line.startswith("ITEM: ATOMS"):
+            line = "ITEM: ATOMS id type element x y z"
+        elif not line.startswith("ITEM") and len(line.split()) == 6:
+            fields = line.split()
+            wrapped = [f"{float(v) % BOX:.4f}" for v in fields[3:]]
+            line = " ".join(fields[:3] + wrapped)
+        out.append(line)
     return "\n".join(out) + "\n"
 
 
@@ -250,6 +266,36 @@ def test_topology_with_elements_list(first_frame: Any, data_file: Any) -> None:
     assert topology.elements == build_topology(first_frame, data_file).elements
 
 
+def test_cores_only_dump_without_elements_uses_drude_masses_of_the_data_file(
+    data_file: Any, write_file: WriteFile
+) -> None:
+    """The cores of a Drude force field are lighter by the Drude mass (N 13.607)."""
+    cores = write_file(
+        "cores.lammpstrj", cores_only(DATA.joinpath("drude.lammpstrj").read_text())
+    )
+    labelled = next(read_frames(cores))
+    path = write_file(
+        "nolabel.lammpstrj", select_columns(cores, ["id", "type", "xu", "yu", "zu"])
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        by_mass = build_topology(next(read_frames(path)), data_file)
+    assert by_mass.elements == build_topology(labelled, data_file).elements
+    assert {"N", "O", "S", "F"} <= set(by_mass.elements)
+
+
+def test_unknown_type_warning_does_not_ask_for_the_given_data_file(
+    data_file: Any, write_file: WriteFile
+) -> None:
+    frame = next(read_frames(write_file("nolabel.lammpstrj", without_elements())))
+    # With only type 21 as Drude type, the other Drude types stay unresolved.
+    with pytest.warns(UserWarning, match="no element known") as caught:
+        build_topology(frame, data_file, drude=parse_drude("21"))
+    assert "data file" not in str(caught[0].message)
+    with pytest.warns(UserWarning, match="a data file"):
+        build_topology(frame)
+
+
 # ---- bonds -----------------------------------------------------------------
 
 
@@ -316,6 +362,49 @@ def test_drude_without_cores_in_system_gets_oxygenless_fallback() -> None:
     elements = ["C", "M"]
     positions = np.array([[0, 0, 0], [0.5, 0, 0]], float)
     assert satellite_bonds(positions, elements).tolist() == [[0, 1]]
+
+
+def nearest_by_all_images(
+    positions: NDArray[np.float64], box: Box, satellite: int, candidates: list[int]
+) -> int:
+    """Return the nearest candidate of an atom, testing all 27 neighbouring images."""
+    shifts = np.array(list(itertools.product((-1, 0, 1), repeat=3))) @ box.matrix.T
+    delta = positions[candidates] - positions[satellite]
+    distance = np.linalg.norm(delta[:, None, :] + shifts[None], axis=2).min(axis=1)
+    return candidates[int(np.argmin(distance))]
+
+
+def test_satellite_hosts_in_a_skewed_cell_match_a_search_of_all_images() -> None:
+    """Hosts found with the cell list agree with a search over all atoms and images.
+
+    Most Drudes sit within 0.4 A of a random core, some across the boundary; one
+    lies 3 A from every core, beyond the cell-list radius.
+    """
+    rng = np.random.default_rng(7)
+    box = Box.from_cell_parameters(14.0, 15.0, 16.0, 80.0, 95.0, 110.0)
+    n_cores = 300
+    fractional = rng.random((n_cores, 3))
+    cores = box.origin + fractional @ box.matrix.T
+    hosts = rng.choice(n_cores, 60, replace=False)
+    offsets = rng.normal(size=(60, 3))
+    offsets *= (
+        rng.uniform(0.05, 0.4, (60, 1)) / np.linalg.norm(offsets, axis=1)[:, None]
+    )
+    drudes = cores[hosts] + offsets
+    lonely = np.array([[7.0, 7.0, 8.0]])
+    positions = np.vstack([cores, drudes, lonely])
+    elements = ["C"] * n_cores + ["D"] * 61
+    # Keep the lonely Drude 3 A from every core.
+    distance = np.linalg.norm(cores - lonely, axis=1)
+    positions[:n_cores][distance < 3.0] += 10.0
+
+    pairs = satellite_bonds(positions, elements, box)
+
+    host_of = {j: i for i, j in pairs.tolist()}
+    candidates = list(range(n_cores))
+    for satellite in range(n_cores, n_cores + 61):
+        expected = nearest_by_all_images(positions, box, satellite, candidates)
+        assert host_of[satellite] == expected
 
 
 # ---- PyMOL -----------------------------------------------------------------
@@ -456,6 +545,54 @@ def test_dump_without_mol_and_data(drude_pairs: NDArray[np.int64]) -> None:
     assert satellite_bond_pairs("d") == sorted_pairs(drude_pairs)
 
 
+def test_wrapped_dump_without_mol_and_data_keeps_drudes_at_their_cores(
+    drude_pairs: NDArray[np.int64], write_file: WriteFile
+) -> None:
+    """Nothing can be wrapped, but no Drude is drawn across the box from its core.
+
+    In frame 1 atom 1 is at x = 0.1 and its Drude at x = 29.8 in the wrapped file.
+    """
+    path = write_file("wrapped.lammpstrj", wrapped_dump())
+    load_lammps(str(path), object="d", quiet=1)
+    assert satellite_bond_pairs("d") == sorted_pairs(drude_pairs)
+    for state, positions in enumerate(dump_positions(), start=1):
+        reference = np.linalg.norm(
+            positions[drude_pairs[:, 0]] - positions[drude_pairs[:, 1]], axis=1
+        )
+        assert pair_distances("d", drude_pairs, state) == pytest.approx(
+            reference, abs=1e-4
+        )
+    # The cores stay where the file has them.
+    frame = next(read_frames(path))
+    cores = ~satellite_mask(build_topology(frame).elements)
+    shown = coordinates_by_id("d")
+    assert shown[cores] == pytest.approx(frame.positions()[cores], abs=1e-4)
+
+
+def test_long_molecule_from_mol_column_keeps_its_drude(write_file: WriteFile) -> None:
+    """A chain longer than half the box, molecule IDs but no bonds (no data file).
+
+    Without bonds the atoms of a molecule are placed next to its first atom; the
+    last carbon stays at x = 5.498, and its Drude at 5.502 must stay with it rather
+    than jump next to the first atom at x = 0.5.
+    """
+    xs = [0.5, 1.75, 3.0, 4.25, 5.498, 5.502]
+    columns = "id mol type element x y z"
+    bounds = ((0.0, 10.0),) * 3
+    text = ""
+    for step, shift in enumerate((0.0, 0.3)):
+        rows = [
+            [i + 1, 1, 2 if i == 5 else 1, "D" if i == 5 else "C", x + shift, 5, 5]
+            for i, x in enumerate(xs)
+        ]
+        text += frame_text(columns, rows, step, bounds)
+    load_lammps(str(write_file("long.lammpstrj", text)), object="long", quiet=1)
+    for state in (1, 2):
+        shown = coordinates_by_id("long", state)
+        assert np.linalg.norm(shown[5] - shown[4]) == pytest.approx(0.004, abs=1e-4)
+    assert satellite_bond_pairs("long") == [(4, 5)]
+
+
 def test_xyz_with_cell_and_boundary_drude(
     data_file: Any, drude_pairs: NDArray[np.int64]
 ) -> None:
@@ -472,9 +609,16 @@ def test_xyz_with_cell_and_boundary_drude(
             assert pair_distances("xyzobj", pairs, state) == pytest.approx(
                 file_distances(positions, pairs), abs=1e-5
             )
-    # The raw file coordinates split the boundary pair across the box.
+    # With the file coordinates the cores stay where the file has them, but the
+    # Drude of atom 1 is not shown across the box from it.
     lammps_wrap("xyzobj", 0, quiet=1)
-    assert pair_distances("xyzobj", drude_pairs).max() > 20.0
+    elements, positions = frame_elements_and_positions()
+    cores = ~satellite_mask(elements)
+    shown = coordinates_by_id("xyzobj")
+    assert shown[cores] == pytest.approx(positions[cores], abs=1e-4)
+    assert pair_distances("xyzobj", drude_pairs) == pytest.approx(
+        file_distances(xyz_positions()[0], drude_pairs), abs=1e-5
+    )
     lammps_wrap("xyzobj", 1, quiet=1)
     assert pair_distances("xyzobj", drude_pairs) == pytest.approx(
         file_distances(xyz_positions()[0], drude_pairs), abs=1e-5

@@ -159,8 +159,25 @@ def mass_sites(
     return sites
 
 
-def satellite_pairs(
+def satellite_hosts(
     bonds: NDArray[np.int64], elements: Sequence[str]
 ) -> NDArray[np.int64]:
-    """Return the bonds that involve a Drude particle or a virtual site."""
-    return bonds[satellite_mask(elements)[bonds].any(axis=1)]
+    """Return the bonds that involve a Drude particle or a virtual site, satellite first.
+
+    Parameters
+    ----------
+    bonds : NDArray[np.int64]
+        Bonded atom pairs, shape (n_bonds, 2).
+    elements : Sequence[str]
+        Element symbol of each atom, with ``D`` and ``M`` for the satellites.
+
+    Returns
+    -------
+    NDArray[np.int64]
+        Pairs ``(satellite, host)``, shape (n_satellite_bonds, 2).
+    """
+    satellite = satellite_mask(elements)
+    pairs = bonds[satellite[bonds].any(axis=1)]
+    satellite_second = ~satellite[pairs[:, 0]]
+    pairs[satellite_second] = pairs[satellite_second, ::-1]
+    return pairs

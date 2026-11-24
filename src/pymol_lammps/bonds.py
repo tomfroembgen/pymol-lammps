@@ -13,7 +13,9 @@ Drude particles (``D``) and virtual sites (``M``) have no covalent radius. Each
 Drude is bonded to its nearest atom that is no Drude or virtual site, and each
 virtual site to its nearest oxygen (or, if the system has no oxygen, its nearest
 other atom), whatever the distance. They are left out of the radius-based search,
-so they neither get other bonds nor create bonds between other atoms.
+so they neither get other bonds nor create bonds between other atoms. The host is
+found with a cell list (atoms sorted into a grid of small cells), so the search
+time grows linearly with the number of atoms.
 """
 
 import itertools
@@ -55,6 +57,11 @@ SATELLITE_RADIUS = 0.5
 
 # Atoms per block of the pair search; a block needs about chunk * n_atoms * 24 bytes.
 _CHUNK = 128
+
+# Radius in Angstrom of the cell-list search for the host of a satellite. A Drude
+# sits 0.1-0.4 A from its core and an M site about 0.25 A from its oxygen; a satellite
+# without any candidate this close is searched among all atoms instead.
+HOST_SEARCH_RADIUS = 2.0
 
 
 def cell_heights(box: Box) -> NDArray[np.float64]:
@@ -175,6 +182,123 @@ def _search_setup(
     return coordinates, shifts
 
 
+def _neighbour_pairs(
+    positions: NDArray[np.float64],
+    queries: NDArray[np.int64],
+    candidates: NDArray[np.int64],
+    box: Box | None,
+    cutoff: float,
+) -> tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.float64]]:
+    """Find all pairs of a query atom and a candidate atom closer than ``cutoff``.
+
+    The atoms are sorted into a grid of cells that are at least ``cutoff`` high, so
+    the partners of a query atom lie in its own cell or in one of the 26 cells
+    around it (a cell list). In a periodic cell the grid wraps around, and the
+    distance is the minimum-image distance, which is exact for ``cutoff`` below half
+    of the smallest cell height.
+
+    Parameters
+    ----------
+    positions : NDArray[np.float64]
+        Cartesian positions in Angstrom, shape (n_atoms, 3).
+    queries, candidates : NDArray[np.int64]
+        Indices of the atoms to search for and of the atoms to search among.
+    box : Box | None
+        Periodic cell, or None for plain distances.
+    cutoff : float
+        Largest distance in Angstrom.
+
+    Returns
+    -------
+    tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.float64]]
+        Query atom, candidate atom and distance of each pair closer than ``cutoff``.
+    """
+    periodic = box is not None
+    if box is None:
+        # A non-periodic grid over the extent of the atoms.
+        extent = np.maximum(np.ptp(positions, axis=0), cutoff)
+        box = Box(origin=positions.min(axis=0), matrix=np.diag(extent))
+    fractional = (positions - box.origin) @ np.linalg.inv(box.matrix).T
+    if periodic:
+        fractional -= np.floor(fractional)
+    n_cells = np.maximum((cell_heights(box) / cutoff).astype(np.int64), 1)
+    # Few cells per atom are enough; larger cells only add candidates to test.
+    limit = 8 * len(candidates) + 27
+    if n_cells.prod() > limit:
+        scale = (limit / n_cells.prod()) ** (1 / 3)
+        n_cells = np.maximum((n_cells * scale).astype(np.int64), 1)
+    cells = np.minimum((fractional * n_cells).astype(np.int64), n_cells - 1)
+
+    keys = np.ravel_multi_index(tuple(cells[candidates].T), tuple(n_cells))
+    by_cell = candidates[np.argsort(keys, kind="stable")]
+    counts = np.bincount(keys, minlength=int(n_cells.prod()))
+    starts = np.cumsum(counts) - counts
+    # Neighbouring cells along each axis; with fewer than three cells the periodic
+    # neighbours repeat, so each is taken once.
+    steps = [
+        np.unique(np.array([-1, 0, 1]) % n) if periodic else np.array([-1, 0, 1])
+        for n in n_cells
+    ]
+    query_parts: list[NDArray[np.int64]] = []
+    candidate_parts: list[NDArray[np.int64]] = []
+    for step in itertools.product(*steps):
+        neighbour = cells[queries] + np.array(step)
+        if periodic:
+            neighbour %= n_cells
+        inside = ((neighbour >= 0) & (neighbour < n_cells)).all(axis=1)
+        cell_keys = np.ravel_multi_index(tuple(neighbour[inside].T), tuple(n_cells))
+        number = counts[cell_keys]
+        # Position of every candidate of these cells in ``by_cell``.
+        offsets = np.arange(number.sum()) - np.repeat(
+            np.cumsum(number) - number, number
+        )
+        query_parts.append(np.repeat(queries[inside], number))
+        candidate_parts.append(by_cell[np.repeat(starts[cell_keys], number) + offsets])
+    query = np.concatenate(query_parts)
+    candidate = np.concatenate(candidate_parts)
+
+    delta = fractional[candidate] - fractional[query]
+    if periodic:
+        delta -= np.round(delta)
+    distance = np.linalg.norm(delta @ box.matrix.T, axis=1)
+    close = distance < cutoff
+    return query[close], candidate[close], distance[close]
+
+
+def _nearest(
+    positions: NDArray[np.float64],
+    elements: list[str],
+    queries: NDArray[np.int64],
+    candidates: NDArray[np.int64],
+    box: Box | None,
+) -> NDArray[np.int64]:
+    """Return the nearest candidate atom of each query atom (minimum image in a box).
+
+    The cell list finds the nearest candidate within ``HOST_SEARCH_RADIUS``; query
+    atoms without one are compared with all candidates.
+    """
+    radius = HOST_SEARCH_RADIUS
+    if box is not None:
+        radius = min(radius, cell_heights(box).min() / 2)
+    query, candidate, distance = _neighbour_pairs(
+        positions, queries, candidates, box, radius
+    )
+    order = np.lexsort((distance, query))
+    query, candidate = query[order], candidate[order]
+    # The first pair of each query atom is its closest.
+    closest = np.diff(query, prepend=-1) != 0
+    nearest = np.full(len(positions), -1)
+    nearest[query[closest]] = candidate[closest]
+
+    far = queries[nearest[queries] < 0]
+    coordinates, shifts = _search_setup(positions, elements, box)
+    for lo in range(0, len(far), _CHUNK):
+        rows = far[lo : lo + _CHUNK]
+        distances = _distance_block(coordinates, rows, box, shifts)[:, candidates]
+        nearest[rows] = candidates[np.argmin(distances, axis=1)]
+    return nearest[queries]
+
+
 def satellite_bonds(
     positions: NDArray[np.float64], elements: list[str], box: Box | None = None
 ) -> NDArray[np.int64]:
@@ -184,6 +308,7 @@ def satellite_bonds(
     virtual site, a virtual site (``M``) to the nearest oxygen, or to the nearest
     such atom if the system has no oxygen. The distance does not matter, because
     the host is always the closest candidate (minimum image in a periodic cell).
+    A system without any candidate (a dump of the Drudes only) gives no bonds.
 
     Parameters
     ----------
@@ -202,20 +327,21 @@ def satellite_bonds(
     satellite = satellite_mask(elements)
     cores = ~satellite
     oxygen = cores & (np.array(elements) == "O")
-    coordinates, shifts = _search_setup(positions, elements, box)
+    virtual = np.array(elements) == VIRTUAL
     pairs: list[NDArray[np.int64]] = [np.empty((0, 2), dtype=np.int64)]
-    satellites = np.flatnonzero(satellite)
-    for lo in range(0, len(satellites), _CHUNK):
-        rows = satellites[lo : lo + _CHUNK]
-        distance = _distance_block(coordinates, rows, box, shifts)
-        # Virtual sites choose among oxygens if there are any.
-        allowed = np.broadcast_to(cores, distance.shape).copy()
-        if oxygen.any():
-            is_virtual = np.array([elements[r] == VIRTUAL for r in rows])
-            allowed[is_virtual] = oxygen
-        host = np.argmin(np.where(allowed, distance, np.inf), axis=1)
-        pairs.append(np.sort(np.column_stack([rows, host]), axis=1).astype(np.int64))
-    return np.concatenate(pairs)
+    # Virtual sites choose among oxygens if there are any.
+    for members, allowed in (
+        (satellite & ~virtual, cores),
+        (virtual, oxygen if oxygen.any() else cores),
+    ):
+        queries = np.flatnonzero(members)
+        candidates = np.flatnonzero(allowed)
+        if len(queries) and len(candidates):
+            hosts = _nearest(positions, elements, queries, candidates, box)
+            pairs.append(np.column_stack([queries, hosts]).astype(np.int64))
+    # In the order of the satellites, each pair sorted.
+    found = np.concatenate(pairs)
+    return np.sort(found[np.argsort(found[:, 0])], axis=1)
 
 
 def guess_bonds(

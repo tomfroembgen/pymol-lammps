@@ -5,7 +5,12 @@ virtual sites (``elem M``) as small light-gray spheres. Their bonds to the host 
 are replaced by thin dashed lines: a PyMOL ``distance`` object in bond mode, with
 the measurement labels hidden. PyMOL cannot dash sticks, and a distance object follows
 all states, so it moves with the trajectory. With ``dashed=0``, thin solid sticks
-are used instead.
+are used instead. Only satellites that are shown, or whose host atom is shown, are
+changed, so that hidden molecules stay hidden.
+
+The dashed satellites of each object are remembered by atom ID, so that the dashes
+can be recomputed after new coordinates are loaded, whatever happened to the
+selection that the user gave.
 
 Sizes and colours are the module constants below; the colours are registered in
 PyMOL as ``drude_gray`` and ``vsite_gray``.
@@ -40,8 +45,25 @@ THIN_STICK_RADIUS = 0.05
 
 SATELLITES = f"{DRUDE}+{VIRTUAL}"
 
-# Selections of the dashed-bond object of each object: Drudes and virtual sites, hosts.
-_DASH_SELECTIONS: dict[str, tuple[str, str]] = {}
+# Representations that make an atom visible; a label alone does not count.
+SHOWN = "rep " + "+".join(
+    [
+        "lines",
+        "sticks",
+        "spheres",
+        "nb_spheres",
+        "nonbonded",
+        "dots",
+        "mesh",
+        "surface",
+        "cartoon",
+        "ribbon",
+        "ellipsoids",
+    ]
+)
+
+# Atom IDs of the Drudes and virtual sites with dashed bonds, per object.
+_DASHED: dict[str, list[int]] = {}
 
 
 def dash_name(object: str) -> str:
@@ -49,7 +71,12 @@ def dash_name(object: str) -> str:
     return f"{object}_drude"
 
 
-def _style_atoms(satellites: str, hosts: str, _self: Any) -> None:
+def _id_selection(name: str, ids: list[int]) -> str:
+    """Return a selection of the atoms of an object with the given IDs."""
+    return f"({name}) and id {'+'.join(str(i) for i in ids)}"
+
+
+def _style_atoms(satellites: str, _self: Any) -> None:
     """Show Drudes and virtual sites as small coloured spheres without sticks."""
     for symbol, radius, color in (
         (DRUDE, DRUDE_RADIUS, DRUDE_COLOR),
@@ -80,9 +107,12 @@ def drude_style(
     drawn as a thin dashed line in the distance object ``<object>_drude``, which
     follows all states. With ``dashed=0``, the bonds are thin solid sticks instead.
 
-    The command only changes the atoms of the selection that are Drudes or virtual
-    sites. It can be repeated: the dash object is replaced. Call it after ``tf`` or
-    after any command that shows sticks on all atoms. The box object is untouched.
+    The command only changes the Drudes and virtual sites of the selection that are
+    shown or whose host atom is shown; hidden molecules stay hidden, and with
+    ``dashed=0`` only shown hosts get sticks. It can be repeated: the dashes of
+    several calls add up, and ``dashed=0`` replaces the dashes of the atoms it
+    styles. Call it after ``tf`` or after any command that shows sticks on all
+    atoms. The box object is untouched.
 
     PyMOL usage::
 
@@ -108,53 +138,71 @@ def drude_style(
         1 to suppress the summary line.
     """
     use_dashes = bool(int(dashed))
-    objects = [
-        name
-        for name in _self.get_object_list(f"({selection})")
-        if _self.count_atoms(f"({selection}) and ({name}) and elem {SATELLITES}")
-    ]
     for name, rgb in COLORS.items():
         _self.set_color(name, list(rgb))
-    for name in objects:
-        satellites = f"({selection}) and ({name}) and elem {SATELLITES}"
+    n_styled = 0
+    n_objects = 0
+    for name in _self.get_object_list(f"({selection})"):
         hosts = f"({name}) and not elem {SATELLITES}"
-        _self.delete(dash_name(name))
-        _style_atoms(satellites, hosts, _self)
+        shown_hosts = f"({hosts}) and ({SHOWN})"
+        ids: list[int] = []
+        _self.iterate(
+            f"({selection}) and ({name}) and elem {SATELLITES} "
+            f"and (({SHOWN}) or neighbor ({shown_hosts}))",
+            "ids.append(ID)",
+            space={"ids": ids},
+        )
+        if not ids:
+            continue
+        n_styled += len(ids)
+        n_objects += 1
+        # The IDs fix the atoms before their representations change.
+        satellites = _id_selection(name, ids)
+        _style_atoms(satellites, _self)
+        dashed_ids: set[int] = set()
+        if dash_name(name) in _self.get_names("objects"):
+            dashed_ids = set(_DASHED.get(name, []))
         if use_dashes:
             _self.unset_bond("stick_radius", satellites, hosts)
-            _dashed_bonds(name, satellites, hosts, _self)
+            dashed_ids |= set(ids)
         else:
             # A bond is drawn only if both atoms show sticks.
             _self.show(
-                "sticks", f"({satellites}) or (({hosts}) and neighbor ({satellites}))"
+                "sticks",
+                f"({satellites}) or (({shown_hosts}) and neighbor ({satellites}))",
             )
             _self.set_bond("stick_radius", THIN_STICK_RADIUS, satellites, hosts)
+            dashed_ids -= set(ids)
+        _self.delete(dash_name(name))
+        _DASHED.pop(name, None)
+        if dashed_ids:
+            _dashed_bonds(name, sorted(dashed_ids), _self)
     if not int(quiet):
-        count = _self.count_atoms(f"({selection}) and elem {SATELLITES}")
         print(
-            f" drude_style: {count} Drudes and virtual sites styled in "
-            f"{len(objects)} object(s)"
-            if objects
-            else " drude_style: no Drudes or virtual sites in the selection"
+            f" drude_style: {n_styled} Drudes and virtual sites styled in "
+            f"{n_objects} object(s)"
+            if n_objects
+            else " drude_style: no Drudes or virtual sites shown in the selection"
         )
 
 
 def _measure(name: str, reset: int, _self: Any) -> None:
-    """Create or update the dashed-bond object of ``name`` from its selections."""
-    satellites, hosts = _DASH_SELECTIONS[name]
+    """Create or update the dashed-bond object of ``name`` from its atom IDs."""
+    satellites = _id_selection(name, _DASHED[name])
+    hosts = f"({name}) and not elem {SATELLITES}"
     dashes = dash_name(name)
-    # Mode 1 measures only bonded pairs. The atoms are selected by element, so it
-    # does not matter in which order PyMOL stores them. State 0 covers all states.
+    # Mode 1 measures only bonded pairs. The atoms are selected by ID, so it does
+    # not matter in which order PyMOL stores them. State 0 covers all states.
     _self.distance(
         dashes, satellites, hosts, mode=1, state=0, zoom=0, reset=reset, quiet=1
     )
     _self.hide("labels", dashes)
 
 
-def _dashed_bonds(name: str, satellites: str, hosts: str, _self: Any) -> None:
-    """Draw the satellite bonds of an object as a dashed distance object."""
+def _dashed_bonds(name: str, ids: list[int], _self: Any) -> None:
+    """Draw the bonds of the satellites with these IDs as a dashed distance object."""
     dashes = dash_name(name)
-    _DASH_SELECTIONS[name] = (satellites, hosts)
+    _DASHED[name] = ids
     _measure(name, 0, _self)
     _self.set("dash_length", DASH_LENGTH, dashes)
     _self.set("dash_gap", DASH_GAP, dashes)
@@ -175,5 +223,5 @@ def refresh_dashes(object: str, *, _self: Any = cmd) -> None:
     object : str
         Name of the molecular object.
     """
-    if object in _DASH_SELECTIONS and dash_name(object) in _self.get_names("objects"):
+    if object in _DASHED and dash_name(object) in _self.get_names("objects"):
         _measure(object, 1, _self)

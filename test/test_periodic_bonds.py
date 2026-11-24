@@ -12,14 +12,20 @@ from typing import Any
 import numpy as np
 import pytest
 from conftest import frame_text
+from numpy.typing import NDArray
 
 pymol = pytest.importorskip("pymol")
 
 from pymol import cmd  # noqa: E402
 
-from pymol_lammps.bonds import periodic_bonds  # noqa: E402
+from pymol_lammps.bonds import cell_heights, periodic_bonds  # noqa: E402
 from pymol_lammps.dump import Box  # noqa: E402
-from pymol_lammps.loader import load_lammps, load_xyz, register  # noqa: E402
+from pymol_lammps.loader import (  # noqa: E402
+    lammps_wrap,
+    load_lammps,
+    load_xyz,
+    register,
+)
 from pymol_lammps.wrapping import Molecules, attach_satellites  # noqa: E402
 
 WriteFile = Callable[[str, str], Path]
@@ -118,32 +124,46 @@ def test_attach_satellites_moves_them_to_the_host() -> None:
     index = np.array([0, 1, 2])
     molecules = Molecules.from_bonds(index, np.zeros((0, 2), dtype=np.int64))
     bonds = np.array([[2, 0]])
-    attached = attach_satellites(molecules, bonds, np.array([False, False, True]))
+    attached = attach_satellites(molecules, bonds, np.array([[2, 0]]))
     assert attached.index[2] == attached.index[0]
     assert attached.index[1] != attached.index[0]
 
 
-def test_wrapped_dump_wraps_the_ring_atom_by_atom(
+def coordinates_by_id(name: str, state: int) -> dict[int, NDArray[np.float64]]:
+    """Return the coordinates of a state by PyMOL atom ID."""
+    shown: dict[int, NDArray[np.float64]] = {}
+    cmd.iterate_state(
+        state, name, "shown[ID] = np.array([x, y, z])", space={"shown": shown, "np": np}
+    )
+    return shown
+
+
+def test_wrapped_ring_is_cut_at_the_same_bond_in_every_frame(
     write_file: WriteFile, data_file: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The ring drifts by 1.6 A per frame, through the boundary several times."""
     columns = "id mol type x y z"
-    text = ring_frame(columns, 0, 0.0, True) + ring_frame(columns, 1, 1.6, True)
+    shifts = [1.6 * k for k in range(6)]
+    text = "".join(ring_frame(columns, k, s, True) for k, s in enumerate(shifts))
     load_lammps(str(write_file("wrapped.lammpstrj", text)), data=data_file, object="r")
     out = capsys.readouterr().out
     assert "bonded through the box boundary" in out
-    # Frame 1 loses the ring bond 6-1 (7.5 A), frame 2 the bond 5-6 cut by the
-    # boundary; the Drude bond stays.
-    assert "2 periodic bonds removed" in out
-    assert bond_pairs("r") == {(1, 2), (2, 3), (3, 4), (4, 5), (1, 7)}
-    model = cmd.get_model("r")
-    index = {a.id: i for i, a in enumerate(model.atom)}
-    for state in (1, 2):
-        coordinates = np.asarray(cmd.get_coords("r", state))
-        cores = coordinates[[index[i] for i in range(1, 7)]]
-        assert ((cores >= 0) & (cores <= BOX)).all()
+    # Only the ring bond 6-1 (7.5 A in frame 1) is removed, in all frames; the
+    # Drude bond stays.
+    assert "1 periodic bond removed" in out
+    assert bond_pairs("r") == {(1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (1, 7)}
+    for state, shift in enumerate(shifts, start=1):
+        shown = coordinates_by_id("r", state)
+        for i, j in bond_pairs("r"):
+            assert np.linalg.norm(shown[i] - shown[j]) < BOX / 2
+        # The ring moves along its path, shifted as a whole by box vectors so that
+        # its centre stays in the box.
+        cores = np.array([shown[i][0] for i in range(1, 7)])
+        images = (cores - np.array(CORE_X) - shift) / BOX
+        assert images == pytest.approx(np.full(6, round(images[0])), abs=1e-4)
+        assert 0 <= np.mean([shown[i][0] for i in range(1, 8)]) < BOX
         # The Drude stays next to its core although it was across the boundary.
-        distance = np.linalg.norm(coordinates[index[1]] - coordinates[index[7]])
-        assert distance == pytest.approx(0.5, abs=1e-4)
+        assert np.linalg.norm(shown[1] - shown[7]) == pytest.approx(0.5, abs=1e-4)
 
 
 def test_unwrapped_dump_keeps_the_ring_in_one_piece(
@@ -198,3 +218,57 @@ def test_wrap_zero_with_wrapped_coordinates_keeps_all_bonds(
     dump = str(write_file("raw.lammpstrj", text))
     load_lammps(dump, data=data_file, object="d_raw", wrap=0, quiet=1)
     assert len(bond_pairs("d_raw")) == 7
+
+
+def test_lammps_wrap_recomputes_the_periodic_bonds(
+    write_file: WriteFile, data_file: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    columns = "id mol type x y z"
+    text = ring_frame(columns, 0, 0.0, True) + ring_frame(columns, 1, 1.6, True)
+    path = str(write_file("wrapped.lammpstrj", text))
+    load_lammps(path, data=data_file, object="r", wrap=0, quiet=1)
+    every_bond = {(1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (1, 6), (1, 7)}
+    assert bond_pairs("r") == every_bond
+    lammps_wrap("r", 1)
+    assert "1 periodic bond removed" in capsys.readouterr().out
+    assert bond_pairs("r") == every_bond - {(1, 6)}
+    for state in (1, 2):
+        shown = coordinates_by_id("r", state)
+        for i, j in bond_pairs("r"):
+            assert np.linalg.norm(shown[i] - shown[j]) < BOX / 2
+    # Back to the file coordinates: the molecule is cut as in the file, and its
+    # bonds are all shown again.
+    lammps_wrap("r", 0, quiet=1)
+    assert bond_pairs("r") == every_bond
+
+
+def test_triclinic_ring_through_the_skewed_boundary(
+    write_file: WriteFile, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A carbon ring along the tilted cell vector b (gamma = 60 degrees).
+
+    The ring drifts along b by 1.6 A per frame, so it crosses the boundary.
+    """
+    box = Box.from_cell_parameters(9.0, 9.0, 9.0, 90.0, 90.0, 60.0)
+    centre = box.matrix @ np.array([0.5, 0.0, 0.5])
+    b = box.matrix[:, 1] / 9.0
+    frames = []
+    for k in range(4):
+        positions = centre + np.outer(0.75 + 1.5 * np.arange(6) + 1.6 * k, b)
+        fractional = positions @ np.linalg.inv(box.matrix).T
+        wrapped = (fractional % 1.0) @ box.matrix.T
+        rows = "\n".join("C {:.5f} {:.5f} {:.5f}".format(*p) for p in wrapped)
+        frames.append(f"6\n\n{rows}\n")
+    path = str(write_file("skewed.xyz", "".join(frames)))
+    load_xyz(path, cell="9 9 9 90 90 60", object="skewed")
+    out = capsys.readouterr().out
+    assert "1 periodic bond removed" in out
+    model = cmd.get_model("skewed")
+    assert len(model.bond) == 5
+    half = cell_heights(box).min() / 2
+    for state in range(1, 5):
+        shown = np.asarray(cmd.get_coords("skewed", state))
+        for bond in model.bond:
+            i, j = bond.index
+            assert np.linalg.norm(shown[i] - shown[j]) == pytest.approx(1.5, abs=1e-3)
+            assert np.linalg.norm(shown[i] - shown[j]) < half
