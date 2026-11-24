@@ -26,8 +26,16 @@ from pymol_lammps.bonds import (
     guess_bonds,
     max_bond_limit,
     molecule_index,
+    satellite_bonds,
 )
 from pymol_lammps.datafile import read_data
+from pymol_lammps.drude import (
+    DRUDE,
+    VIRTUAL,
+    parse_drude,
+    satellite_mask,
+    satellite_pairs,
+)
 from pymol_lammps.dump import Box, Frame, parse_cell, read_frames
 from pymol_lammps.topology import Topology, build_topology
 from pymol_lammps.wrapping import (
@@ -121,6 +129,34 @@ def _chempy_model(topology: Topology, positions: NDArray[Any]) -> Any:
     return model
 
 
+def _finish_satellites(
+    name: str,
+    topology: Topology,
+    satellite_bond_pairs: NDArray[np.int64] | None,
+    _self: Any,
+) -> None:
+    """Prepare the Drude particles and virtual sites of a loaded object.
+
+    PyMOL treats the symbol ``D`` as deuterium: it counts as hydrogen in the
+    selection ``hydro``, which would make ``hide (hydro)`` hide the Drudes as well.
+    Setting the atomic number to 0 removes them from ``hydro``; ``elem D`` and
+    ``elem M`` select them.
+
+    If PyMOL guessed the bonds itself (``satellite_bond_pairs`` is given), its bonds
+    to satellites are replaced by one bond per satellite to its host atom (pairs of
+    indices into the topology).
+    """
+    if not satellite_mask(topology.elements).any():
+        return
+    _self.alter(f"{name} and elem {DRUDE}", "protons = 0")
+    if satellite_bond_pairs is not None:
+        _self.unbond(f"{name} and elem {DRUDE}+{VIRTUAL}", name)
+        ids = topology.ids.tolist()
+        for i, j in satellite_bond_pairs.tolist():
+            # PyMOL stores atoms in its own order; the atom ID is stable.
+            _self.bond(f"{name} and id {ids[i]}", f"{name} and id {ids[j]}")
+
+
 def _box_cgo(box: Box) -> list[float]:
     """Return the box edges as a CGO line object."""
     lines: list[float] = [cgo.BEGIN, cgo.LINES, cgo.COLOR, *BOX_COLOR]
@@ -155,6 +191,7 @@ def load_lammps(
     box: int | str = 1,
     wrap: int | str = 1,
     quiet: int | str = 0,
+    drude: int | str | Sequence[int] = "auto",
     *,
     _self: Any = cmd,
 ) -> None:
@@ -174,10 +211,21 @@ def load_lammps(
     file, masses, molecule IDs, charges, names and bonds are read from it. The
     atom type is stored as ``numeric_type`` and ``text_type``.
 
+    Drude particles of polarizable force fields are found automatically: element
+    label ``D`` (dump ``element`` column or ``elements=``), or, when the elements
+    come from masses, a type with 0 < mass < 0.8 g/mol. ``drude=21 22 23`` names the
+    Drude atom types instead, ``drude=0`` switches the detection off (a label ``D``
+    then means deuterium). A massless site (label ``M`` or mass below 1e-8, the M
+    site of SWM4-NDP water) is a virtual site. Drudes are stored with element ``D``
+    and virtual sites with element ``M``: select them with ``elem D`` and
+    ``elem M``. Their bonds come from the data file; without one, each Drude is
+    bonded to its nearest other atom and each virtual site to its nearest oxygen.
+    A dump of the cores only simply has no Drudes.
+
     PyMOL usage::
 
         load_lammps filename [, data [, object [, start [, stop [, interval
-                    [, elements [, box [, wrap ]]]]]]]]
+                    [, elements [, box [, wrap [, quiet [, drude ]]]]]]]]]]
 
     Examples::
 
@@ -185,7 +233,9 @@ def load_lammps(
         load_lammps traj.lammpstrj, data=system.data
         load_lammps traj.lammpstrj, interval=10, elements=C H O N
         load_lammps traj.lammpstrj, data=system.data, wrap=0
+        load_lammps traj.lammpstrj, data=system.data, drude=21 22 23
         color red, text_type 3
+        select drudes, elem D
 
     Parameters
     ----------
@@ -207,6 +257,9 @@ def load_lammps(
         1 to wrap whole molecules into the box, 0 to keep the dump coordinates.
     quiet : int, optional
         1 to suppress the summary line.
+    drude : int | str | Sequence[int], optional
+        ``auto`` (default), ``0`` to switch Drude detection off, or the Drude atom
+        types, e.g. ``"21 22 23"``.
 
     Raises
     ------
@@ -224,7 +277,9 @@ def load_lammps(
         if first is None:
             raise ValueError(f"{filename}: no complete frame in the selected range")
         data_file = read_data(_self.exp_path(data)) if data else None
-        topology = build_topology(first, data_file, type_elements or None)
+        topology = build_topology(
+            first, data_file, type_elements or None, parse_drude(drude)
+        )
         index = topology.molecule_index()
         molecules = (
             None if index is None else Molecules.from_bonds(index, topology.bonds)
@@ -238,6 +293,14 @@ def load_lammps(
         _self.alter(name, "ID = ids[rank]", space={"ids": topology.ids.tolist()})
         if topology.bonds is None:
             _self.rebond(name, 1, pbc=0)
+        _finish_satellites(
+            name,
+            topology,
+            None
+            if topology.bonds is not None
+            else satellite_bonds(first.positions(), topology.elements, first.box),
+            _self,
+        )
         _set_box(name, first.box, 1, show_box, _self)
 
         n_states = 1
@@ -294,6 +357,7 @@ def load_xyz(
     box: int | str = 1,
     wrap: int | str = 1,
     quiet: int | str = 0,
+    drude: int | str = "auto",
     *,
     _self: Any = cmd,
 ) -> None:
@@ -321,10 +385,17 @@ def load_xyz(
     PyMOL guesses the bonds, and ``resi`` still holds the molecule number found
     from plain distances.
 
+    The labels ``D`` (Drude particle) and ``M`` (virtual site, e.g. the M site of
+    SWM4-NDP water), in any case, are kept as the elements ``D`` and ``M``: select
+    them with ``elem D`` and ``elem M``. Each Drude is bonded to its nearest other
+    atom and each virtual site to its nearest oxygen, whatever the distance, and
+    they travel with that molecule when it is wrapped. ``drude=0`` reads a label
+    ``D`` as deuterium (element H) instead.
+
     PyMOL usage::
 
         load_xyz filename [, object [, start [, stop [, interval [, cell [, box
-                 [, wrap ]]]]]]]
+                 [, wrap [, quiet [, drude ]]]]]]]]]
 
     Examples::
 
@@ -333,6 +404,7 @@ def load_xyz(
         load_xyz aimd.xyz, cell=12.4 12.4 15 90 90 120, interval=5
         load_xyz extended.xyz, wrap=0
         select mol3, resi 3
+        select drudes, elem D
 
     Parameters
     ----------
@@ -353,11 +425,15 @@ def load_xyz(
         1 to wrap whole molecules into the cell, 0 to keep the file coordinates.
     quiet : int, optional
         1 to suppress the summary line.
+    drude : int | str, optional
+        ``auto`` (default) keeps labels ``D`` as Drude particles; ``0`` reads them
+        as deuterium. Atom types do not exist in xyz files.
 
     Raises
     ------
     pymol.CmdException
-        If the file or the cell cannot be interpreted.
+        If the file or the cell cannot be interpreted, or ``drude`` is not ``auto``
+        or ``0``.
     """
     name = object or _default_name(filename, _self)
     show_box = bool(int(box))
@@ -378,14 +454,21 @@ def load_xyz(
                 stacklevel=2,
             )
 
-        n_atoms = len(first.elements)
-        bonds = guess_bonds(first.positions, first.elements, first_box)
+        drude_setting = parse_drude(drude)
+        if drude_setting.mode == "types":
+            raise ValueError("load_xyz takes drude=auto or drude=0 (no atom types)")
+        elements = first.elements
+        if drude_setting.mode == "off":
+            elements = ["H" if e == DRUDE else e for e in elements]
+
+        n_atoms = len(elements)
+        bonds = guess_bonds(first.positions, elements, first_box)
         index = molecule_index(n_atoms, bonds)
         molecules = None
         if first_box is not None:
             molecules = Molecules.from_bonds(index, bonds)
             height = cell_heights(first_box).min()
-            if max_bond_limit(first.elements) > height / 2:
+            if max_bond_limit(elements) > height / 2:
                 warnings.warn(
                     f"the smallest cell height is {height:.1f} A, less than twice the "
                     "longest bond limit; molecules may be wrapped incorrectly",
@@ -396,7 +479,7 @@ def load_xyz(
                 molecules,
                 first_box,
                 bonds,
-                bond_limits(first.elements, bonds),
+                bond_limits(elements, bonds),
             )
             if n_periodic:
                 warnings.warn(
@@ -406,12 +489,12 @@ def load_xyz(
                 )
         do_wrap = bool(int(wrap))
 
-        _, element_types = np.unique(first.elements, return_inverse=True)
+        _, element_types = np.unique(elements, return_inverse=True)
         topology = Topology(
             ids=np.arange(1, n_atoms + 1),
             types=element_types.astype(np.int64) + 1,
-            elements=first.elements,
-            names=first.elements,
+            elements=elements,
+            names=elements,
             residue_names=[""] * n_atoms,
             residue_ids=[str(i + 1) for i in index],
             charges=None,
@@ -426,6 +509,12 @@ def load_xyz(
         _self.alter(name, "ID = ids[rank]", space={"ids": topology.ids.tolist()})
         if topology.bonds is None:
             _self.rebond(name, 1, pbc=0)
+        _finish_satellites(
+            name,
+            topology,
+            None if topology.bonds is not None else satellite_pairs(bonds, elements),
+            _self,
+        )
         if first_box is not None:
             _set_box(name, first_box, 1, show_box, _self)
 

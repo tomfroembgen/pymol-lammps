@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
+from pymol_lammps.drude import SATELLITES
 from pymol_lammps.dump import Box, open_text
 from pymol_lammps.elements import ELEMENT_MASSES
 
@@ -31,7 +32,8 @@ class XyzFrame:
     positions : NDArray[np.float64]
         Cartesian positions in Angstrom, shape (n_atoms, 3).
     elements : list[str]
-        Normalised element symbols, one per atom.
+        Normalised element symbols, one per atom; ``D`` and ``M`` mark Drude
+        particles and virtual sites.
     box : Box | None
         Cell from the ``Lattice`` tag of the comment line, or None if absent.
     """
@@ -46,7 +48,11 @@ def normalise_element(label: str) -> str:
 
     Digits and other trailing characters are dropped, then the capitalisation is
     fixed. A two-letter label that is no element falls back to its first letter
-    (``"HW"`` becomes ``"H"``).
+    (``"HW"`` becomes ``"H"``). The labels ``D`` (Drude particle) and ``M`` (virtual
+    site of a water model) are not elements and are kept as ``"D"`` and ``"M"``,
+    independent of case; this applies to the bare letter only (``"MG"`` is still
+    magnesium and ``"MW"`` is unknown). Digits are dropped first, so ``"D1"`` is a
+    Drude.
 
     Parameters
     ----------
@@ -65,6 +71,8 @@ def normalise_element(label: str) -> str:
     """
     letters = re.match(r"[A-Za-z]+", label)
     word = letters.group().capitalize() if letters else ""
+    if word.upper() in SATELLITES:
+        return word.upper()
     for candidate in (word[:2], word[:1]):
         if candidate in ELEMENT_MASSES:
             return candidate

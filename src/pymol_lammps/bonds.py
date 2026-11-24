@@ -8,6 +8,12 @@ bond graph.
 Alkali and alkaline-earth metals are treated as ions and get no bonds, so that a
 cation does not merge with its solvation shell into one molecule. All other
 elements, including other metals, are bonded by covalent radii.
+
+Drude particles (``D``) and virtual sites (``M``) have no covalent radius. Each
+Drude is bonded to its nearest atom that is no Drude or virtual site, and each
+virtual site to its nearest oxygen (or, if the system has no oxygen, its nearest
+other atom), whatever the distance. They are left out of the radius-based search,
+so they neither get other bonds nor create bonds between other atoms.
 """
 
 import itertools
@@ -15,6 +21,7 @@ import itertools
 import numpy as np
 from numpy.typing import NDArray
 
+from pymol_lammps.drude import SATELLITES, VIRTUAL, satellite_mask
 from pymol_lammps.dump import Box
 
 # Covalent radii in Angstrom (Cordero et al., Dalton Trans. 2008, 2832; single-bond,
@@ -40,6 +47,11 @@ IONS = frozenset({"Li", "Na", "K", "Rb", "Cs", "Be", "Mg", "Ca", "Sr", "Ba"})
 # lower limit drops overlapping atoms, which are not bonds.
 BOND_TOLERANCE = 0.4
 MIN_DISTANCE = 0.4
+
+# Radius in Angstrom that Drude particles and virtual sites contribute to the distance
+# limit of their bond; with the radius of the core and BOND_TOLERANCE the limit is at
+# least 1.2 A, well above the usual 0.1-0.4 A of a Drude.
+SATELLITE_RADIUS = 0.5
 
 # Atoms per block of the pair search; a block needs about chunk * n_atoms * 24 bytes.
 _CHUNK = 128
@@ -71,14 +83,104 @@ def cell_heights(box: Box) -> NDArray[np.float64]:
 
 def max_bond_limit(elements: list[str]) -> float:
     """Return the largest distance below which two of these elements are bonded."""
-    radii = [COVALENT_RADII[e] for e in set(elements) - IONS]
+    radii = [COVALENT_RADII[e] for e in set(elements) - IONS - SATELLITES]
     return 2 * max(radii) + BOND_TOLERANCE if radii else 0.0
+
+
+def _radii(elements: list[str]) -> NDArray[np.float64]:
+    """Return the covalent radius of each atom; satellites get ``SATELLITE_RADIUS``."""
+    return np.array(
+        [
+            SATELLITE_RADIUS if element in SATELLITES else COVALENT_RADII[element]
+            for element in elements
+        ]
+    )
 
 
 def bond_limits(elements: list[str], bonds: NDArray[np.int64]) -> NDArray[np.float64]:
     """Return the distance limit (sum of radii plus tolerance) of each bond."""
-    radii = np.array([COVALENT_RADII[element] for element in elements])
+    radii = _radii(elements)
     return radii[bonds[:, 0]] + radii[bonds[:, 1]] + BOND_TOLERANCE
+
+
+def _distance_block(
+    coordinates: NDArray[np.float64],
+    rows: NDArray[np.int64],
+    box: Box | None,
+    shifts: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Return the distances of some atoms to all atoms, shape (len(rows), n_atoms).
+
+    ``coordinates`` are Cartesian without a box and fractional with one; ``shifts``
+    are the neighbouring images to test (one zero row for plain rounding).
+    """
+    delta = coordinates[None, :, :] - coordinates[rows, None, :]
+    if box is None:
+        return np.linalg.norm(delta, axis=2)
+    delta -= np.round(delta)
+    return np.min(
+        [np.linalg.norm((delta + s) @ box.matrix.T, axis=2) for s in shifts], axis=0
+    )
+
+
+def _search_setup(
+    positions: NDArray[np.float64], elements: list[str], box: Box | None
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return the coordinates for ``_distance_block`` and the image shifts to test."""
+    if box is None:
+        coordinates = positions
+    else:
+        coordinates = (positions - box.origin) @ np.linalg.inv(box.matrix).T
+    skewed = box is not None and max_bond_limit(elements) > cell_heights(box).min() / 2
+    shifts = (
+        np.array(list(itertools.product((-1, 0, 1), repeat=3)), dtype=float)
+        if skewed
+        else np.zeros((1, 3))
+    )
+    return coordinates, shifts
+
+
+def satellite_bonds(
+    positions: NDArray[np.float64], elements: list[str], box: Box | None = None
+) -> NDArray[np.int64]:
+    """Bond each Drude particle and virtual site to its host atom.
+
+    A Drude (``D``) is bonded to the nearest atom that is neither a Drude nor a
+    virtual site, a virtual site (``M``) to the nearest oxygen, or to the nearest
+    such atom if the system has no oxygen. The distance does not matter, because
+    the host is always the closest candidate (minimum image in a periodic cell).
+
+    Parameters
+    ----------
+    positions : NDArray[np.float64]
+        Cartesian positions in Angstrom, shape (n_atoms, 3).
+    elements : list[str]
+        Element symbol of each atom, with ``D`` and ``M`` for the satellites.
+    box : Box | None, optional
+        Periodic cell for the minimum-image convention. None uses plain distances.
+
+    Returns
+    -------
+    NDArray[np.int64]
+        One pair ``(i, j)`` with ``i < j`` per satellite, shape (n_satellites, 2).
+    """
+    satellite = satellite_mask(elements)
+    cores = ~satellite
+    oxygen = cores & (np.array(elements) == "O")
+    coordinates, shifts = _search_setup(positions, elements, box)
+    pairs: list[NDArray[np.int64]] = [np.empty((0, 2), dtype=np.int64)]
+    satellites = np.flatnonzero(satellite)
+    for lo in range(0, len(satellites), _CHUNK):
+        rows = satellites[lo : lo + _CHUNK]
+        distance = _distance_block(coordinates, rows, box, shifts)
+        # Virtual sites choose among oxygens if there are any.
+        allowed = np.broadcast_to(cores, distance.shape).copy()
+        if oxygen.any():
+            is_virtual = np.array([elements[r] == VIRTUAL for r in rows])
+            allowed[is_virtual] = oxygen
+        host = np.argmin(np.where(allowed, distance, np.inf), axis=1)
+        pairs.append(np.sort(np.column_stack([rows, host]), axis=1).astype(np.int64))
+    return np.concatenate(pairs)
 
 
 def guess_bonds(
@@ -90,7 +192,9 @@ def guess_bonds(
     atoms. The minimum image is found by rounding the fractional difference. In a
     strongly skewed cell this is the nearest image only if the distance is below half
     of the smallest cell height (``cell_heights``); then the 26 neighbouring images
-    are tested as well, which is slower.
+    are tested as well, which is slower. Drude particles and virtual sites are
+    bonded to their host atom by ``satellite_bonds`` and take no part in the search
+    by radii.
 
     Parameters
     ----------
@@ -107,40 +211,25 @@ def guess_bonds(
         Bonded atom pairs ``(i, j)`` with ``i < j``, shape (n_bonds, 2).
     """
     n_atoms = len(positions)
-    radii = np.array([COVALENT_RADII[element] for element in elements])
-    if box is None:
-        coordinates = positions
-    else:
-        coordinates = (positions - box.origin) @ np.linalg.inv(box.matrix).T
-
-    is_ion = np.array([element in IONS for element in elements])
-    skewed = box is not None and max_bond_limit(elements) > cell_heights(box).min() / 2
-    shifts = (
-        np.array(list(itertools.product((-1, 0, 1), repeat=3)), dtype=float)
-        if skewed
-        else np.zeros((1, 3))
-    )
+    radii = _radii(elements)
+    coordinates, shifts = _search_setup(positions, elements, box)
+    # Ions and satellites are never bonded by radii.
+    excluded = np.array([e in IONS or e in SATELLITES for e in elements])
     pairs: list[NDArray[np.int64]] = [np.empty((0, 2), dtype=np.int64)]
     columns = np.arange(n_atoms)
     for lo in range(0, n_atoms, _CHUNK):
         hi = min(lo + _CHUNK, n_atoms)
-        delta = coordinates[None, :, :] - coordinates[lo:hi, None, :]
-        if box is None:
-            distance = np.linalg.norm(delta, axis=2)
-        else:
-            delta -= np.round(delta)
-            distance = np.min(
-                [np.linalg.norm((delta + s) @ box.matrix.T, axis=2) for s in shifts],
-                axis=0,
-            )
+        distance = _distance_block(coordinates, np.arange(lo, hi), box, shifts)
         limit = radii[lo:hi, None] + radii[None, :] + BOND_TOLERANCE
         bonded = (distance < limit) & (distance > MIN_DISTANCE)
         # Each pair once: keep the upper triangle.
         bonded &= columns[None, :] > np.arange(lo, hi)[:, None]
-        bonded &= ~(is_ion[lo:hi, None] | is_ion[None, :])
+        bonded &= ~(excluded[lo:hi, None] | excluded[None, :])
         i, j = np.nonzero(bonded)
         pairs.append(np.column_stack([i + lo, j]).astype(np.int64))
-    return np.concatenate(pairs)
+    pairs.append(satellite_bonds(positions, elements, box))
+    result = np.concatenate(pairs)
+    return result[np.lexsort((result[:, 1], result[:, 0]))]
 
 
 def molecule_index(n_atoms: int, bonds: NDArray[np.int64]) -> NDArray[np.int64]:

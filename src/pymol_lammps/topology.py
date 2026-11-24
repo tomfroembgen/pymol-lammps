@@ -3,7 +3,9 @@
 Each property is taken from the most specific source available:
 
 - element: explicit per-type list > dump ``element`` column > mass (dump ``mass``
-  column, then data-file ``Masses``) > carbon as placeholder, with a warning
+  column, then data-file ``Masses``) > carbon as placeholder, with a warning. Drude
+  particles and virtual sites become the pseudo-elements ``D`` and ``M`` (see
+  ``pymol_lammps.drude``).
 - atom name: data-file atom comment > type name (type label or ``Masses`` comment)
   > type number
 - residue name: data-file atom comment (fftool writes the species name there)
@@ -20,6 +22,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from pymol_lammps.datafile import DataFile
+from pymol_lammps.drude import DrudeSetting, label_sites, mass_sites
 from pymol_lammps.dump import Frame
 from pymol_lammps.elements import element_from_mass
 
@@ -89,8 +92,14 @@ def _elements(
     types: NDArray[np.int64],
     data: DataFile | None,
     type_elements: Sequence[str] | None,
+    drude: DrudeSetting,
 ) -> list[str]:
     """Resolve the element of each atom, warning about unresolved atom types.
+
+    Drude particles and virtual sites get the pseudo-elements ``D`` and ``M``. The
+    mass of a core atom in a Drude force field is reduced by the Drude mass
+    (N is 13.607 instead of 14.007), so an unresolved mass is tried again with the
+    Drude masses added.
 
     Raises
     ------
@@ -103,20 +112,32 @@ def _elements(
                 f"{len(type_elements)} elements given, but the dump has atom "
                 f"type {types.max()}; give one element per atom type, in type order"
             )
-        return [type_elements[t - 1] for t in types]
+        return label_sites([type_elements[t - 1] for t in types], types, drude)
     if "element" in frame.columns:
-        return frame.column("element").tolist()
+        return label_sites(frame.column("element").tolist(), types, drude)
 
     if "mass" in frame.columns:
         masses = frame.column("mass").astype(float)
     elif data is not None:
-        masses = np.array([data.type_masses.get(int(t), 0.0) for t in types])
+        masses = np.array([data.type_masses.get(int(t), np.nan) for t in types])
     else:
-        masses = np.zeros(len(types))
-    by_mass = {m: element_from_mass(m) for m in np.unique(masses)}
-    elements = [by_mass[m] or FALLBACK_ELEMENT for m in masses]
+        # Without any mass, "massless" must not be concluded from a placeholder.
+        masses = np.full(len(types), np.nan)
+    sites = mass_sites(types, masses, drude)
+    drude_masses = np.unique(masses[sites == "D"])
 
-    unresolved = sorted({int(t) for t, m in zip(types, masses) if not by_mass[m]})
+    def resolve(mass: float) -> str:
+        for shift in (0.0, *drude_masses):
+            if element := element_from_mass(mass + shift):
+                return element
+        return ""
+
+    unique_masses, inverse = np.unique(masses, return_inverse=True)
+    by_mass = [resolve(m) for m in unique_masses]
+    resolved = [site or by_mass[k] for site, k in zip(sites, inverse)]
+    elements = [element or FALLBACK_ELEMENT for element in resolved]
+
+    unresolved = sorted({int(t) for t, element in zip(types, resolved) if not element})
     if unresolved:
         warnings.warn(
             f"no element known for atom types {unresolved}; shown as "
@@ -131,6 +152,7 @@ def build_topology(
     frame: Frame,
     data: DataFile | None = None,
     type_elements: Sequence[str] | None = None,
+    drude: DrudeSetting = DrudeSetting(),
 ) -> Topology:
     """Build per-atom properties for the atoms of a dump frame.
 
@@ -144,6 +166,8 @@ def build_topology(
     type_elements : Sequence[str] | None, optional
         Element of each atom type in type order (type 1 first). Overrides all
         other element sources.
+    drude : DrudeSetting, optional
+        How Drude particles are detected; see ``pymol_lammps.drude``.
 
     Returns
     -------
@@ -200,7 +224,7 @@ def build_topology(
     return Topology(
         ids=ids,
         types=types,
-        elements=_elements(frame, types, data, type_elements),
+        elements=_elements(frame, types, data, type_elements, drude),
         names=names,
         residue_names=residue_names,
         residue_ids=residue_ids,

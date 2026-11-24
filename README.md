@@ -181,6 +181,26 @@ works on objects from `load_xyz` and switches between the two views after loadin
   `C1` or `HW` are reduced to the element symbol.
 
 
+## Drude particles (short note)
+
+Polarizable force fields such as CL&Pol add a light Drude particle to each polarizable
+core atom, and some water models (SWM4-NDP) add a massless M site. Both are loaded as
+extra atoms. The Drude particles get the element `D` and the M sites the element `M`,
+so `select drudes, elem D` and `select msites, elem M` find them. The loader removes
+the Drudes from PyMOL's `hydro` selection, because PyMOL otherwise treats `D` as
+deuterium. The LAMMPS atom type stays in `numeric_type`.
+
+A Drude is recognised by the element label `D` in the dump (`element` column) or in
+the xyz file, or, if the elements come from masses, by a mass between 0 and 0.8 g/mol.
+A massless atom or the label `M` marks an M site. `drude=21 22 23` names the Drude
+atom types explicitly, and `drude=0` switches the detection off (a label `D` then means
+deuterium). The bonds between cores and Drudes come from the data file. Without a data
+file (and for xyz files), each Drude is bonded to its nearest other atom and each M
+site to its nearest oxygen. All of them move with their molecule when it is wrapped.
+A dump of the cores only contains no Drudes and loads as before. A full description
+follows in a later version of this README.
+
+
 ## The data file: why `data=` matters
 
 A dump file contains only numbers per frame: atom ID, type number and
