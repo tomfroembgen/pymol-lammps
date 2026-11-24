@@ -60,3 +60,36 @@ def test_molecules_are_connected_components() -> None:
     index = molecule_index(7, bonds)
 
     assert index.tolist() == [0, 0, 0, 1, 1, 1, 2]
+
+
+def test_skewed_cell_finds_bonds_in_the_interior() -> None:
+    # Simple cubic 10 A lattice written with c = (30, 0, 10): rounding the fractional
+    # difference picks a wrong image for this pair, 1.7 A apart.
+    box = Box(
+        origin=np.zeros(3), matrix=np.array([[10.0, 0, 30], [0, 10, 0], [0, 0, 10]])
+    )
+    positions = np.array([[20.0, 5.0, 4.0], [20.0, 5.0, 5.7]])
+
+    assert guess_bonds(positions, ["C", "C"], box).tolist() == [[0, 1]]
+
+
+def test_ions_get_no_bonds() -> None:
+    # Na+ with six waters at 2.4 A (inside the Na-O limit of 2.72 A) and a Cl-.
+    rows = [("Na", 5.0, 5.0, 5.0), ("Cl", 1.0, 1.0, 1.0)]
+    for axis in np.eye(3):
+        for sign in (1, -1):
+            o = 5.0 + 2.4 * sign * axis
+            side = np.roll(axis, 1)
+            rows += [
+                ("O", *o),
+                ("H", *(o + 0.96 * sign * axis)),
+                ("H", *(o + 0.96 * side)),
+            ]
+    elements = [row[0] for row in rows]
+    positions = np.array([row[1:] for row in rows])
+
+    bonds = guess_bonds(positions, elements, Box.from_cell_parameters(15.0))
+    index = molecule_index(len(rows), bonds)
+
+    assert len(set(index.tolist())) == 8
+    assert index[0] != index[2]

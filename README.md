@@ -119,25 +119,31 @@ constant, but a cell that changes between frames (NpT) is handled as well.
 ```
 load_xyz aimd.xyz, cell=12.4                      # cubic cell, 12.4 A
 load_xyz aimd.xyz, cell=12.4 12.4 15              # orthorhombic cell
-load_xyz aimd.xyz, cell=12.4,12.4,15,90,90,120    # a b c alpha beta gamma
+load_xyz aimd.xyz, cell=12.4 12.4 15 90 90 120    # a b c alpha beta gamma
 load_xyz aimd.xyz, cell=12.4, interval=10, wrap=0
 ```
 
 **The cell.** The `cell` argument is a string in Angstrom and degree. One number
 gives a cube, three numbers give the edge lengths a, b and c with right angles,
 and six numbers give a, b, c, alpha, beta and gamma. Numbers are separated by
-spaces or commas. If `cell` is not given, the loader looks for the `Lattice="..."`
+spaces. Do not use commas inside the PyMOL command, because PyMOL splits the
+arguments of a command at commas; the Python function accepts both. If `cell` is not given, the loader looks for the `Lattice="..."`
 tag in the comment line of each frame of an extended xyz file and uses that cell
 for the frame; this is why a cell that changes between frames works. If a file has a
 `Lattice` and you also give `cell`, the cell argument is used and a warning
 is printed once. If there is no cell at all, no box is drawn and nothing is
-wrapped; `wrap=1` then only prints a warning.
+wrapped, and `wrap` has no effect.
 
 **Bonds and molecules.** With a cell, the loader guesses the bonds from the first
 frame. Two atoms are bonded if their distance, measured with the minimum-image
 convention in the cell, is smaller than the sum of their covalent radii plus
 0.4 A. Because of the minimum image, bonds across the cell boundary are found.
-The molecules are the groups of atoms connected by these bonds. They are stored
+Alkali and alkaline-earth metals (Li, Na, K, Rb, Cs, Be, Mg, Ca, Sr, Ba) are
+treated as ions and receive no bonds, so that a cation does not become part of one
+molecule together with the solvent molecules around it. Every other metal is bonded
+by the covalent radii like any other element, which can join a metal complex or a
+metal surface with its ligands into one molecule. The molecules are the groups of
+atoms connected by these bonds. They are stored
 as `resi` (numbered from 1 in the order of their first atom), so `select mol3,
 resi 3` selects the third molecule. The atom name is the element symbol and the
 residue name is empty.
@@ -151,6 +157,15 @@ works on objects from `load_xyz` and switches between the two views after loadin
 
 **Limitations.**
 
+- A molecule that is bonded through the cell boundary to its own periodic image,
+  such as an infinite chain, a slab or a crystal, cannot be put together again.
+  Such molecules are detected, their atoms are wrapped one by one into the cell,
+  and a warning gives their number. The bonds to the other side of the cell are
+  then drawn across the box.
+- In a strongly skewed cell, rounding to the nearest image can fail for bonds. The
+  bond search tests the neighbouring cells as well, but wrapping does not. A warning
+  is printed if the smallest height of the cell (the distance between two opposite
+  faces) is smaller than twice the longest bond limit.
 - The bonds and molecules are determined once, from the first frame, and kept
   for all frames. Reactions during the run, such as proton transfer, are therefore
   not reflected, and a molecule that is already broken in frame 1 stays broken.

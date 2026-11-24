@@ -163,3 +163,24 @@ def test_element_labels_are_normalised(label: str, symbol: str) -> None:
 def test_unknown_element_raises(label: str) -> None:
     with pytest.raises(ValueError, match="unknown element"):
         normalise_element(label)
+
+
+def test_quotes_around_the_cell_are_ignored() -> None:
+    np.testing.assert_allclose(
+        parse_cell('"10 11 12"').cell_parameters(), (10, 11, 12, 90, 90, 90)
+    )
+
+
+def test_right_angles_give_exact_zeros() -> None:
+    box = Box.from_cell_parameters(10, 11, 12)
+
+    assert box.matrix[0, 1] == 0.0
+    assert box.matrix[0, 2] == 0.0
+    assert box.matrix[1, 2] == 0.0
+
+
+def test_frame_without_atoms_is_an_error(write_file: WriteFile) -> None:
+    path = write_file("zero.xyz", "0\ncomment\n")
+
+    with pytest.raises(ValueError, match="frame 1 has no atoms"):
+        list(read_frames(path))

@@ -140,7 +140,7 @@ def test_without_cell_nothing_is_changed(
     np.testing.assert_allclose(
         coordinates("waters"), [row[1:] for row in CUT_WATER], atol=1e-5
     )
-    assert "not wrapped" in capsys.readouterr().out
+    assert "warning" not in capsys.readouterr().out
     # Plain distances still number the molecules (the cut water falls apart).
     assert cmd.count_atoms("waters and resi 1") == 2
 
@@ -188,3 +188,41 @@ def test_command_line_usage(write_file: WriteFile) -> None:
     cmd.do(f"load_xyz {path}, cell=10 10 10, interval=2, quiet=1")
 
     assert cmd.count_states("waters") == 1
+
+
+def test_chain_through_the_boundary_is_wrapped_by_atom(
+    write_file: WriteFile, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rows = [("C", 0.75 + 1.5 * i, 6.0, 6.0) for i in range(8)]
+    text = "8\n\n" + "\n".join(f"{e} {x} {y} {z}" for e, x, y, z in rows) + "\n"
+    path = write_file("alkane.xyz", text)
+
+    load_xyz(str(path), cell="12", quiet=1)
+
+    x = coordinates("alkane")[:, 0]
+    assert np.all((x >= 0) & (x <= 12))
+    assert "1 molecule(s)" in capsys.readouterr().out
+
+
+def test_crystal_stays_inside_the_cell(write_file: WriteFile) -> None:
+    rows = [
+        ("Si", 2.3 * i + 0.5, 2.3 * j + 0.5, 2.3 * k + 0.5)
+        for i in range(4)
+        for j in range(4)
+        for k in range(4)
+    ]
+    text = "64\n\n" + "\n".join(f"{e} {x} {y} {z}" for e, x, y, z in rows) + "\n"
+    path = write_file("crystal.xyz", text)
+
+    load_xyz(str(path), cell="9.2", quiet=1)
+
+    xyz = coordinates("crystal")
+    assert np.all((xyz >= 0) & (xyz <= 9.2))
+
+
+def test_atom_at_zero_stays_at_zero(write_file: WriteFile) -> None:
+    path = write_file("edge.xyz", "1\n\nAr 0.0 5.0 5.0\n")
+
+    load_xyz(str(path), cell="10", quiet=1)
+
+    assert coordinates("edge")[0, 0] == 0.0

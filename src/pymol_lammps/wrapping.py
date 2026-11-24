@@ -89,6 +89,51 @@ class Molecules:
         return cls(index=index, anchor=anchor, levels=levels)
 
 
+def split_wrapping_molecules(
+    positions: NDArray[np.float64],
+    molecules: Molecules,
+    box: Box,
+    bonds: NDArray[np.int64],
+    limits: NDArray[np.float64],
+) -> tuple[Molecules, int]:
+    """Turn molecules that are bonded through the cell boundary into single atoms.
+
+    A chain, slab or crystal that is connected across the periodic boundary cannot
+    be reassembled: after walking along the bonds, some bond is still longer than
+    its limit. Wrapping such a molecule as a whole would leave part of it outside
+    the cell, so its atoms are wrapped one by one instead.
+
+    Parameters
+    ----------
+    positions : NDArray[np.float64]
+        Cartesian positions, shape (n_atoms, 3).
+    molecules : Molecules
+        Molecule membership and reassembly order.
+    box : Box
+        Simulation box.
+    bonds : NDArray[np.int64]
+        Bonded atom pairs, shape (n_bonds, 2).
+    limits : NDArray[np.float64]
+        Largest plausible length of each bond in Angstrom, shape (n_bonds,).
+
+    Returns
+    -------
+    tuple[Molecules, int]
+        Molecules for wrapping, with each atom of an affected molecule on its own,
+        and the number of affected molecules.
+    """
+    whole = wrap_molecules(positions, molecules, box, make_whole=True)
+    length = np.linalg.norm(whole[bonds[:, 0]] - whole[bonds[:, 1]], axis=1)
+    cut = np.unique(molecules.index[bonds[length > limits + 1e-6, 0]])
+    if len(cut) == 0:
+        return molecules, 0
+    index = molecules.index.copy()
+    atoms = np.isin(index, cut)
+    index[atoms] = index.max() + 1 + np.arange(atoms.sum())
+    _, index = np.unique(index, return_inverse=True)
+    return Molecules.from_bonds(index.astype(np.int64), bonds), len(cut)
+
+
 def wrap_molecules(
     positions: NDArray[np.float64],
     molecules: Molecules,

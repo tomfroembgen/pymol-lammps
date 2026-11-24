@@ -114,8 +114,12 @@ class Box:
                 f"cell angles must lie between 0 and 180 degree, got "
                 f"{alpha} {beta} {gamma}"
             )
-        cos_a, cos_b, cos_g = np.cos(np.radians([alpha, beta, gamma]))
-        sin_g = np.sin(np.radians(gamma))
+        # Exact zeros for right angles, so that atoms at x = 0 stay at 0.
+        cos_a, cos_b, cos_g = (
+            0.0 if angle == 90 else np.cos(np.radians(angle))
+            for angle in (alpha, beta, gamma)
+        )
+        sin_g = 1.0 if gamma == 90 else np.sin(np.radians(gamma))
         cx = c * cos_b
         cy = c * (cos_a - cos_b * cos_g) / sin_g
         cz_squared = c**2 - cx**2 - cy**2
@@ -180,8 +184,10 @@ def parse_cell(text: str) -> Box:
     ----------
     text : str
         One number (cube), three numbers (a b c, right angles) or six numbers
-        (a b c alpha beta gamma), separated by whitespace and/or commas. Lengths
-        are in Angstrom, angles in degree.
+        (a b c alpha beta gamma), separated by whitespace and/or commas, with
+        optional surrounding quotes. Lengths are in Angstrom, angles in degree.
+        Commas work from Python only; PyMOL splits command arguments at commas, so
+        use spaces in ``load_xyz``.
 
     Returns
     -------
@@ -194,7 +200,9 @@ def parse_cell(text: str) -> Box:
         If the string does not hold 1, 3 or 6 numbers, or the cell is invalid.
     """
     try:
-        values = [float(token) for token in text.replace(",", " ").split()]
+        values = [
+            float(token) for token in text.strip("\"' ").replace(",", " ").split()
+        ]
     except ValueError:
         raise ValueError(f"cell {text!r} must contain only numbers") from None
     if len(values) not in (1, 3, 6):

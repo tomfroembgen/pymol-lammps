@@ -4,7 +4,13 @@ Two atoms are bonded if their distance is below the sum of their covalent radii 
 a tolerance. In a periodic cell the distance is the minimum-image distance, so bonds
 across the cell boundary are found. Molecules are the connected components of the
 bond graph.
+
+Alkali and alkaline-earth metals are treated as ions and get no bonds, so that a
+cation does not merge with its solvation shell into one molecule. All other
+elements, including other metals, are bonded by covalent radii.
 """
+
+import itertools
 
 import numpy as np
 from numpy.typing import NDArray
@@ -27,6 +33,9 @@ COVALENT_RADII: dict[str, float] = {
     "Hg": 1.32, "Pb": 1.46, "Bi": 1.48, "U": 1.96,
 }  # fmt: skip
 
+# Ions: never bonded, each one is its own molecule.
+IONS = frozenset({"Li", "Na", "K", "Rb", "Cs", "Be", "Mg", "Ca", "Sr", "Ba"})
+
 # A pair is bonded if MIN_DISTANCE < d < r_i + r_j + BOND_TOLERANCE (Angstrom). The
 # lower limit drops overlapping atoms, which are not bonds.
 BOND_TOLERANCE = 0.4
@@ -36,15 +45,52 @@ MIN_DISTANCE = 0.4
 _CHUNK = 128
 
 
+def cell_heights(box: Box) -> NDArray[np.float64]:
+    """Return the distances between the opposite faces of the cell.
+
+    Parameters
+    ----------
+    box : Box
+        Periodic cell.
+
+    Returns
+    -------
+    NDArray[np.float64]
+        Height of the cell along a, b and c in Angstrom, shape (3,). Rounding the
+        fractional difference of two atoms gives their true minimum image only if
+        their distance is below half of the smallest height.
+    """
+    a, b, c = box.matrix.T
+    volume = abs(np.linalg.det(box.matrix))
+    areas = np.array(
+        [np.linalg.norm(np.cross(b, c)), np.linalg.norm(np.cross(c, a))]
+        + [np.linalg.norm(np.cross(a, b))]
+    )
+    return volume / areas
+
+
+def max_bond_limit(elements: list[str]) -> float:
+    """Return the largest distance below which two of these elements are bonded."""
+    radii = [COVALENT_RADII[e] for e in set(elements) - IONS]
+    return 2 * max(radii) + BOND_TOLERANCE if radii else 0.0
+
+
+def bond_limits(elements: list[str], bonds: NDArray[np.int64]) -> NDArray[np.float64]:
+    """Return the distance limit (sum of radii plus tolerance) of each bond."""
+    radii = np.array([COVALENT_RADII[element] for element in elements])
+    return radii[bonds[:, 0]] + radii[bonds[:, 1]] + BOND_TOLERANCE
+
+
 def guess_bonds(
     positions: NDArray[np.float64], elements: list[str], box: Box | None = None
 ) -> NDArray[np.int64]:
     """Find bonded atom pairs from covalent radii.
 
     The search runs in blocks of atoms, so memory stays small for several thousand
-    atoms. For strongly skewed triclinic cells the minimum image taken in fractional
-    coordinates is not always the nearest one; this does not matter for bonds, which
-    are short compared to the cell.
+    atoms. The minimum image is found by rounding the fractional difference. In a
+    strongly skewed cell this is the nearest image only if the distance is below half
+    of the smallest cell height (``cell_heights``); then the 26 neighbouring images
+    are tested as well, which is slower.
 
     Parameters
     ----------
@@ -67,19 +113,31 @@ def guess_bonds(
     else:
         coordinates = (positions - box.origin) @ np.linalg.inv(box.matrix).T
 
+    is_ion = np.array([element in IONS for element in elements])
+    skewed = box is not None and max_bond_limit(elements) > cell_heights(box).min() / 2
+    shifts = (
+        np.array(list(itertools.product((-1, 0, 1), repeat=3)), dtype=float)
+        if skewed
+        else np.zeros((1, 3))
+    )
     pairs: list[NDArray[np.int64]] = [np.empty((0, 2), dtype=np.int64)]
     columns = np.arange(n_atoms)
     for lo in range(0, n_atoms, _CHUNK):
         hi = min(lo + _CHUNK, n_atoms)
         delta = coordinates[None, :, :] - coordinates[lo:hi, None, :]
-        if box is not None:
+        if box is None:
+            distance = np.linalg.norm(delta, axis=2)
+        else:
             delta -= np.round(delta)
-            delta = delta @ box.matrix.T
-        distance = np.linalg.norm(delta, axis=2)
+            distance = np.min(
+                [np.linalg.norm((delta + s) @ box.matrix.T, axis=2) for s in shifts],
+                axis=0,
+            )
         limit = radii[lo:hi, None] + radii[None, :] + BOND_TOLERANCE
         bonded = (distance < limit) & (distance > MIN_DISTANCE)
         # Each pair once: keep the upper triangle.
         bonded &= columns[None, :] > np.arange(lo, hi)[:, None]
+        bonded &= ~(is_ion[lo:hi, None] | is_ion[None, :])
         i, j = np.nonzero(bonded)
         pairs.append(np.column_stack([i + lo, j]).astype(np.int64))
     return np.concatenate(pairs)

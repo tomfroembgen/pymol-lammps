@@ -20,11 +20,21 @@ from numpy.typing import NDArray
 from pymol import cgo, cmd, importing
 
 from pymol_lammps import xyz
-from pymol_lammps.bonds import guess_bonds, molecule_index
+from pymol_lammps.bonds import (
+    bond_limits,
+    cell_heights,
+    guess_bonds,
+    max_bond_limit,
+    molecule_index,
+)
 from pymol_lammps.datafile import read_data
 from pymol_lammps.dump import Box, Frame, parse_cell, read_frames
 from pymol_lammps.topology import Topology, build_topology
-from pymol_lammps.wrapping import Molecules, wrap_molecules
+from pymol_lammps.wrapping import (
+    Molecules,
+    split_wrapping_molecules,
+    wrap_molecules,
+)
 
 # Grey stays visible on both black and white backgrounds.
 BOX_COLOR = (0.5, 0.5, 0.5)
@@ -302,9 +312,14 @@ def load_xyz(
     from 1 in the order of their first atom and stored as ``resi``. Atom names
     are the element symbols.
 
-    Without a cell there is no box and no wrapping (``wrap`` has no effect, with a
-    warning); PyMOL guesses the bonds, and ``resi`` still holds the molecule
-    number found from plain distances.
+    Alkali and alkaline-earth metals (Li, Na, K, Rb, Cs, Be, Mg, Ca, Sr, Ba) are
+    treated as ions and get no bonds. Molecules that are bonded through the cell
+    boundary (a chain, slab or crystal) cannot be reassembled; their atoms are
+    wrapped one by one and a warning is printed.
+
+    Without a cell there is no box and no wrapping (``wrap`` has no effect);
+    PyMOL guesses the bonds, and ``resi`` still holds the molecule number found
+    from plain distances.
 
     PyMOL usage::
 
@@ -315,7 +330,7 @@ def load_xyz(
 
         load_xyz aimd.xyz, cell=12.4
         load_xyz aimd.xyz, cell=12.4 12.4 15
-        load_xyz aimd.xyz, cell=12.4,12.4,15,90,90,120, interval=5
+        load_xyz aimd.xyz, cell=12.4 12.4 15 90 90 120, interval=5
         load_xyz extended.xyz, wrap=0
         select mol3, resi 3
 
@@ -330,7 +345,8 @@ def load_xyz(
         First frame (1-based), last frame (inclusive, -1 for all) and stride.
     cell : str, optional
         Cell in Angstrom and degree: ``a`` (cube), ``a b c`` (right angles) or
-        ``a b c alpha beta gamma``, separated by spaces or commas.
+        ``a b c alpha beta gamma``, separated by spaces. (In PyMOL, commas split
+        the arguments; they work only when calling this function from Python.)
     box : int, optional
         1 to draw the cell as the object ``<object>_box``; 0 to skip it.
     wrap : int, optional
@@ -365,11 +381,30 @@ def load_xyz(
         n_atoms = len(first.elements)
         bonds = guess_bonds(first.positions, first.elements, first_box)
         index = molecule_index(n_atoms, bonds)
-        molecules = None if first_box is None else Molecules.from_bonds(index, bonds)
+        molecules = None
+        if first_box is not None:
+            molecules = Molecules.from_bonds(index, bonds)
+            height = cell_heights(first_box).min()
+            if max_bond_limit(first.elements) > height / 2:
+                warnings.warn(
+                    f"the smallest cell height is {height:.1f} A, less than twice the "
+                    "longest bond limit; molecules may be wrapped incorrectly",
+                    stacklevel=2,
+                )
+            molecules, n_periodic = split_wrapping_molecules(
+                first.positions,
+                molecules,
+                first_box,
+                bonds,
+                bond_limits(first.elements, bonds),
+            )
+            if n_periodic:
+                warnings.warn(
+                    f"{n_periodic} molecule(s) are bonded through the cell boundary "
+                    "(chain, slab or crystal); their atoms are wrapped individually",
+                    stacklevel=2,
+                )
         do_wrap = bool(int(wrap))
-        if do_wrap and molecules is None:
-            warnings.warn("no cell, so molecules were not wrapped", stacklevel=2)
-            do_wrap = False
 
         _, element_types = np.unique(first.elements, return_inverse=True)
         topology = Topology(

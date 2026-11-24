@@ -138,6 +138,8 @@ def read_frames(
                     f"{path}: expected an atom count for frame {index}, got "
                     f"{count_line.strip()!r}"
                 ) from None
+            if n_atoms == 0:
+                raise ValueError(f"{path}: frame {index} has no atoms")
             comment = fh.readline()
             rows = list(itertools.islice(fh, n_atoms))
             if len(rows) < n_atoms:
