@@ -266,6 +266,49 @@ def test_topology_with_elements_list(first_frame: Any, data_file: Any) -> None:
     assert topology.elements == build_topology(first_frame, data_file).elements
 
 
+def relabel_drudes(label: str) -> str:
+    """Return the fixture dump with the element label of every Drude replaced."""
+    out = []
+    for line in (DATA / "drude.lammpstrj").read_text().splitlines():
+        fields = line.split()
+        if len(fields) == 6 and fields[2] == "D":
+            line = " ".join([*fields[:2], label, *fields[3:]])
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def test_data_file_types_override_the_element_column(
+    first_frame: Any, data_file: Any, write_file: WriteFile
+) -> None:
+    """Drude types of mass 0.4 in the data file are Drudes whatever the dump says."""
+    frame = next(read_frames(write_file("x.lammpstrj", relabel_drudes("X"))))
+    topology = build_topology(frame, data_file)
+    assert topology.elements.count("D") == N_DRUDES
+    assert "X" not in topology.elements
+    assert topology.elements.count("M") == N_VIRTUAL
+    # The same for elements given per type.
+    labels = [*"N C C C H C H H C C H C C F S N O O H O".split(), *["C"] * 14]
+    listed = build_topology(frame, data_file, type_elements=labels)
+    assert listed.elements == build_topology(first_frame, data_file).elements
+
+
+def test_dp_comment_marks_drude_types_of_any_mass(write_file: WriteFile) -> None:
+    """fftool writes ``# NA DP``; the word DP makes a type a Drude type."""
+    text = (DATA / "drude.data").read_text().replace("0.400  # ", "1.500  # ")
+    data = read_data(write_file("dp.data", text))
+    assert data.type_names[21] == "NA"
+    assert data.type_comments[21] == ["NA", "DP"]
+    frame = next(read_frames(write_file("x.lammpstrj", relabel_drudes("X"))))
+    assert build_topology(frame, data).elements.count("D") == N_DRUDES
+
+
+def test_drude_off_keeps_the_labels(data_file: Any, write_file: WriteFile) -> None:
+    frame = next(read_frames(write_file("x.lammpstrj", relabel_drudes("X"))))
+    topology = build_topology(frame, data_file, drude=parse_drude(0))
+    assert "D" not in topology.elements
+    assert topology.elements.count("X") == N_DRUDES
+
+
 def test_cores_only_dump_without_elements_uses_drude_masses_of_the_data_file(
     data_file: Any, write_file: WriteFile
 ) -> None:
@@ -652,6 +695,34 @@ def test_lammps_masses_and_explicit_types(write_file: WriteFile) -> None:
     types = " ".join(str(t) for t in range(21, 35))
     load_lammps(path, data=DATA_FILE, object="listed", quiet=1, drude=types)
     assert count("listed", "elem D") == N_DRUDES
+
+
+D2O_ROWS = [[1, 1, "O", 5.0, 5.0, 5.0], [2, 2, "D", 5.96, 5.0, 5.0]]
+D2O_ROWS.append([3, 2, "D", 4.76, 5.93, 5.0])
+
+
+def test_deuterium_labelled_d_gives_a_warning(
+    write_file: WriteFile, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bounds = ((0.0, 10.0),) * 3
+    text = frame_text("id type element x y z", D2O_ROWS, 0, bounds)
+    path = str(write_file("d2o.lammpstrj", text))
+    load_lammps(path, object="heavy")
+    assert "deuterium, load again with drude=0" in capsys.readouterr().out
+    load_lammps(path, object="heavy", quiet=1)
+    assert capsys.readouterr().out == ""
+    rows = "\n".join(" ".join(str(v) for v in row[2:]) for row in D2O_ROWS)
+    load_xyz(str(write_file("d2o.xyz", f"3\n\n{rows}\n")), cell="10")
+    assert "deuterium" in capsys.readouterr().out
+
+
+def test_drude_particles_give_no_deuterium_warning(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    load_lammps(DUMP, data=DATA_FILE, object="d")
+    load_lammps(DUMP, object="nodata")
+    load_xyz(XYZ, object="xyzobj")
+    assert "deuterium" not in capsys.readouterr().out
 
 
 def test_cores_only_dump_has_no_drudes(write_file: WriteFile) -> None:

@@ -76,19 +76,38 @@ def _id_selection(name: str, ids: list[int]) -> str:
     return f"({name}) and id {'+'.join(str(i) for i in ids)}"
 
 
+# Radius and colour of each satellite element.
+_LOOK = ((DRUDE, DRUDE_RADIUS, DRUDE_COLOR), (VIRTUAL, VSITE_RADIUS, VSITE_COLOR))
+
+
+def colour_satellites(selection: str, *, _self: Any = cmd) -> None:
+    """Give the Drudes and virtual sites of a selection their colour and radius.
+
+    The loaders call this, so that the particles have their look as soon as they
+    are shown as spheres; the representations are not changed.
+
+    Parameters
+    ----------
+    selection : str
+        Atoms whose Drudes (``elem D``) and virtual sites (``elem M``) are changed.
+    """
+    for name, rgb in COLORS.items():
+        _self.set_color(name, list(rgb))
+    for symbol, radius, color in _LOOK:
+        atoms = f"({selection}) and elem {symbol}"
+        _self.alter(atoms, f"vdw = {radius}")
+        _self.color(color, atoms)
+
+
 def _style_atoms(satellites: str, _self: Any) -> None:
     """Show Drudes and virtual sites as small coloured spheres without sticks."""
-    for symbol, radius, color in (
-        (DRUDE, DRUDE_RADIUS, DRUDE_COLOR),
-        (VIRTUAL, VSITE_RADIUS, VSITE_COLOR),
-    ):
+    colour_satellites(satellites, _self=_self)
+    for symbol, _, _ in _LOOK:
         atoms = f"({satellites}) and elem {symbol}"
         # Parentheses make it an atom selection; "all" would also hide the box CGO.
         _self.hide("everything", f"({atoms})")
-        _self.alter(atoms, f"vdw = {radius}")
         _self.set("sphere_scale", 1.0, atoms)
         _self.show("spheres", atoms)
-        _self.color(color, atoms)
         _self.rebuild(atoms, "spheres")
 
 
@@ -138,8 +157,6 @@ def drude_style(
         1 to suppress the summary line.
     """
     use_dashes = bool(int(dashed))
-    for name, rgb in COLORS.items():
-        _self.set_color(name, list(rgb))
     n_styled = 0
     n_objects = 0
     for name in _self.get_object_list(f"({selection})"):

@@ -18,8 +18,19 @@ Detection, in order of precedence (``drude=auto``):
    virtual site. This needs a known mass, so a dump without ``mass`` column and
    without data file never produces satellites this way.
 
-``drude=0`` switches the Drude detection off. A label ``D`` is then read as
-deuterium (element H). Virtual sites are not affected by this setting.
+A data file overrides the element labels of the dump and of ``elements=``: an
+atom type that the data file marks as Drude (rule 3 on its ``Masses``, or the word
+``DP`` in the comment of the ``Masses`` line, as fftool writes it) becomes ``D``,
+and a massless type becomes ``M``. With ``drude=21 22 23`` only the listed types
+are Drudes, and the ``DP`` word is not used.
+
+``drude=0`` switches the Drude detection off, including the override by the data
+file. A label ``D`` is then read as deuterium (element H). Virtual sites found from
+masses are not affected by this setting.
+
+A label ``D`` can also mean deuterium. Real Drude particles sit about 0.01 A from
+their core, deuterium about 1 A from its bonded atom, so the loaders warn if the
+median distance of the ``D`` atoms to their host is above ``DEUTERIUM_DISTANCE``.
 """
 
 import re
@@ -38,6 +49,14 @@ SATELLITES = frozenset({DRUDE, VIRTUAL})
 # Drude; below VIRTUAL_MASS_MAX it is massless.
 DRUDE_MASS_MAX = 0.8
 VIRTUAL_MASS_MAX = 1e-8
+
+# Word in the comment of a ``Masses`` line that marks a Drude type (fftool).
+DRUDE_TOKEN = "DP"
+
+# Median distance in Angstrom of the ``D`` atoms to their host above which they look
+# like deuterium (O-D 0.96 A) rather than Drude particles (about 0.01 A, rarely more
+# than 0.1 A).
+DEUTERIUM_DISTANCE = 0.3
 
 
 @dataclass(frozen=True)
@@ -93,6 +112,40 @@ def parse_drude(value: int | str | Sequence[int]) -> DrudeSetting:
             "'21 22 23'"
         )
     return DrudeSetting("types", frozenset(int(t) for t in tokens))
+
+
+def data_sites(
+    type_masses: dict[int, float],
+    type_comments: dict[int, list[str]],
+    setting: DrudeSetting,
+) -> dict[int, str]:
+    """Return the atom types that a data file marks as Drudes or virtual sites.
+
+    Parameters
+    ----------
+    type_masses : dict[int, float]
+        Mass of each atom type in g/mol (data file ``Masses``).
+    type_comments : dict[int, list[str]]
+        Words of the ``Masses`` comment of each atom type.
+    setting : DrudeSetting
+        Drude detection setting; ``off`` marks nothing.
+
+    Returns
+    -------
+    dict[int, str]
+        ``"D"`` or ``"M"`` for each marked atom type; other types are left out.
+    """
+    if setting.mode == "off":
+        return {}
+    types = np.array(sorted(type_masses), dtype=np.int64)
+    masses = np.array([type_masses[t] for t in types.tolist()])
+    sites = mass_sites(types, masses, setting)
+    marked = {int(t): str(s) for t, s in zip(types, sites) if s}
+    if setting.mode == "auto":
+        for atom_type, words in type_comments.items():
+            if DRUDE_TOKEN in words and atom_type not in marked:
+                marked[atom_type] = DRUDE
+    return marked
 
 
 def satellite_mask(elements: Sequence[str]) -> NDArray[np.bool_]:

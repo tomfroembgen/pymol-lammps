@@ -22,7 +22,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from pymol_lammps.datafile import DataFile
-from pymol_lammps.drude import DrudeSetting, label_sites, mass_sites
+from pymol_lammps.drude import DrudeSetting, data_sites, label_sites, mass_sites
 from pymol_lammps.dump import Frame
 from pymol_lammps.elements import element_from_mass
 
@@ -102,20 +102,29 @@ def _elements(
     Drude masses added. These come from the Drudes in the dump and from the Drude
     types of the data file, so that a dump of the cores only is resolved as well.
 
+    The atom types that the data file marks as Drudes or virtual sites
+    (``pymol_lammps.drude.data_sites``) become ``D`` and ``M`` whatever the labels
+    say, unless ``drude=0``.
+
     Raises
     ------
     ValueError
         If ``type_elements`` has fewer entries than the highest atom type.
     """
+    marked = (
+        {} if data is None else data_sites(data.type_masses, data.type_comments, drude)
+    )
     if type_elements:
         if len(type_elements) < types.max():
             raise ValueError(
                 f"{len(type_elements)} elements given, but the dump has atom "
                 f"type {types.max()}; give one element per atom type, in type order"
             )
-        return label_sites([type_elements[t - 1] for t in types], types, drude)
+        labels = label_sites([type_elements[t - 1] for t in types], types, drude)
+        return [marked.get(int(t), label) for t, label in zip(types, labels)]
     if "element" in frame.columns:
-        return label_sites(frame.column("element").tolist(), types, drude)
+        labels = label_sites(frame.column("element").tolist(), types, drude)
+        return [marked.get(int(t), label) for t, label in zip(types, labels)]
 
     if "mass" in frame.columns:
         masses = frame.column("mass").astype(float)
@@ -125,13 +134,13 @@ def _elements(
         # Without any mass, "massless" must not be concluded from a placeholder.
         masses = np.full(len(types), np.nan)
     sites = mass_sites(types, masses, drude)
+    sites = np.array([marked.get(int(t), site) for t, site in zip(types, sites)])
     drude_masses = masses[sites == "D"]
     if data is not None:
         # A dump of the cores only has no Drudes; their mass is in the data file.
-        type_ids = np.array(sorted(data.type_masses), dtype=np.int64)
-        type_masses = np.array([data.type_masses[t] for t in type_ids.tolist()])
-        data_sites = mass_sites(type_ids, type_masses, drude)
-        drude_masses = np.concatenate([drude_masses, type_masses[data_sites == "D"]])
+        drude_masses = np.concatenate(
+            [drude_masses, [data.type_masses[t] for t, s in marked.items() if s == "D"]]
+        )
     drude_masses = np.unique(drude_masses)
 
     def resolve(mass: float) -> str:

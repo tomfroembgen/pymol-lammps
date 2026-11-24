@@ -61,7 +61,11 @@ class DataFile:
     type_masses : dict[int, float]
         Mass of each atom type.
     type_names : dict[int, str]
-        Name of each atom type, from type labels or ``Masses`` comments.
+        Name of each atom type, from type labels or the first word of the
+        ``Masses`` comment.
+    type_comments : dict[int, list[str]]
+        All words of the ``Masses`` comment of each atom type (fftool marks Drude
+        types with ``DP``, as in ``# NA DP``); empty lists where there is none.
     bonds : NDArray[np.int64]
         Bonded atom ID pairs, shape (n_bonds, 2).
     """
@@ -74,6 +78,7 @@ class DataFile:
     residue_names: list[str]
     type_masses: dict[int, float]
     type_names: dict[int, str]
+    type_comments: dict[int, list[str]]
     bonds: NDArray[np.int64]
 
 
@@ -200,10 +205,12 @@ def read_data(filename: str | Path) -> DataFile:
         return int(token) if token.isdigit() else labels[token]
 
     type_masses: dict[int, float] = {}
+    type_comments: dict[int, list[str]] = {}
     type_names = {number: label for label, number in labels.items()}
     for line in sections.get("Masses", []):
         number = type_id(line.values[0])
         type_masses[number] = float(line.values[1])
+        type_comments[number] = line.comment
         if line.comment and number not in type_names:
             type_names[number] = line.comment[0]
 
@@ -229,6 +236,7 @@ def read_data(filename: str | Path) -> DataFile:
         residue_names=[c[1] if len(c) > 1 else "" for c in comments],
         type_masses=type_masses,
         type_names=type_names,
+        type_comments=type_comments,
         bonds=np.array(
             [line.values[2:4] for line in sections.get("Bonds", [])], dtype=np.int64
         ).reshape(-1, 2),

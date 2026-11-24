@@ -73,6 +73,38 @@ def bond_radii() -> list[float | None]:
     return [row[2] for _, rows in result for row in rows]
 
 
+@pytest.mark.parametrize("loader_name", ["load_lammps", "load_xyz"])
+def test_loading_gives_the_colours_and_radii_but_keeps_the_representations(
+    loader_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def load(name: str) -> None:
+        if loader_name == "load_lammps":
+            load_lammps(DUMP, data=DATA_FILE, object=name, quiet=1)
+        else:
+            loader.load_xyz(str(DATA / "drude.xyz"), object=name, quiet=1)
+
+    load("d")
+    drude_colour = per_atom("d and elem D", "cmd.get_color_tuple(color)")
+    msite_colour = per_atom("d and elem M", "cmd.get_color_tuple(color)")
+    assert drude_colour == [pytest.approx(style.COLORS["drude_gray"], abs=1e-3)] * (
+        N_DRUDES
+    )
+    assert msite_colour == [pytest.approx(style.COLORS["vsite_gray"], abs=1e-3)] * (
+        N_VIRTUAL
+    )
+    assert per_atom("d and elem D", "vdw") == [pytest.approx(style.DRUDE_RADIUS)] * (
+        N_DRUDES
+    )
+    assert per_atom("d and elem M", "vdw") == [pytest.approx(style.VSITE_RADIUS)] * (
+        N_VIRTUAL
+    )
+    # The representations are those of a load without the colouring step.
+    monkeypatch.setattr(loader, "colour_satellites", lambda *_, **__: None)
+    load("plain")
+    assert per_atom("d", "(ID, reps)") == per_atom("plain", "(ID, reps)")
+    assert "d_drude" not in cmd.get_names("objects")
+
+
 def test_colours_radii_and_representations(loaded: str) -> None:
     cores_before = per_atom("d and not elem D+M", "vdw")
     drude_style("d", quiet=1)

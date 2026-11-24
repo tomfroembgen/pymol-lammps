@@ -201,8 +201,25 @@ They are recognised in this order:
    0.8 g/mol is a Drude particle (their masses are about 0.4 g/mol, and hydrogen is
    1.008 g/mol), and a type with a mass below 1e-8 g/mol is an M site.
 
-`drude=0` switches the Drude detection off, and a label `D` then means deuterium.
-A dump that contains only the core atoms has no Drude particles and loads as before.
+A data file takes precedence over the element labels of rules 1 and 2. Every atom
+type that the data file marks as a Drude type, either by a mass between 0 and
+0.8 g/mol or by the word `DP` in the comment of its `Masses` line (fftool writes
+`# NA DP`), is loaded as `D`. A massless type in the data file is loaded as `M`.
+This holds whatever the `element` column of the dump or `elements=` says, so a dump
+written with another label for the Drude particles still loads correctly. With
+`drude=21 22 23`, only the listed types are Drude types, and the word `DP` is not
+used.
+
+`drude=0` switches the Drude detection off, including the precedence of the data
+file, and a label `D` then means deuterium. A dump that contains only the core atoms
+has no Drude particles and loads as before.
+
+Because the label `D` is also the symbol of deuterium, the loaders check the
+distance of the `D` atoms to the atom they are bonded to in the first frame. A Drude
+particle sits about 0.01 A from its core, whereas a deuterium atom sits about 0.96 A
+from its oxygen. If the median distance is larger than 0.3 A, the loaders print a
+warning that the atoms look like deuterium and suggest loading again with
+`drude=0`. The warning is not printed with `quiet=1`.
 
 **Selections and bonds.** `select drudes, elem D` and `select msites, elem M` find
 the particles, and the LAMMPS atom type stays available as `numeric_type`. PyMOL
@@ -219,9 +236,12 @@ longer than half the box without a data file).
 
 **Display style.** A Drude particle lies very close to its core. In the first frame
 of a simulation of an ionic liquid on graphene with 3036 Drude particles, the median
-distance between a Drude particle and its core is 0.0095 A and the largest 0.085 A. In the usual stick style the
-particle is therefore hidden inside its core atom. `drude_style` gives the particles
-their own look:
+distance between a Drude particle and its core is 0.0095 A and the largest 0.085 A.
+In the usual stick style the particle is therefore hidden inside its core atom.
+Already on loading, Drude particles and M sites get the colours and radii that are
+described below, but they keep the representations of all other atoms, so that
+loading does not change what is shown. `drude_style` then gives the particles their
+own look:
 
 ```
 drude_style                     # all objects
@@ -397,7 +417,7 @@ From a Python script:
 
 | PyMOL property | Source, first available wins |
 |---|---|
-| `elem` | `elements=` > dump `element` column > mass (dump `mass` column, data-file `Masses`) > `C` with a warning |
+| `elem` | Drude and M-site types of the data file (`D`, `M`, unless `drude=0`) > `elements=` > dump `element` column > mass (dump `mass` column, data-file `Masses`) > `C` with a warning |
 | `name` | data-file comment after the atom (fftool) > type label or `Masses` comment > type number |
 | `resn` | data-file comment after the atom (fftool writes the species, e.g. `c2c1im+`) |
 | `resi` | dump `mol` column > data-file molecule ID |

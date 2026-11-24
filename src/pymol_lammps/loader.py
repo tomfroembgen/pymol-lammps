@@ -33,6 +33,7 @@ from pymol_lammps.bonds import (
 )
 from pymol_lammps.datafile import read_data
 from pymol_lammps.drude import (
+    DEUTERIUM_DISTANCE,
     DRUDE,
     VIRTUAL,
     parse_drude,
@@ -40,7 +41,7 @@ from pymol_lammps.drude import (
     satellite_mask,
 )
 from pymol_lammps.dump import Box, parse_cell, read_frames
-from pymol_lammps.style import drude_style, refresh_dashes
+from pymol_lammps.style import colour_satellites, drude_style, refresh_dashes
 from pymol_lammps.topology import Topology, build_topology
 from pymol_lammps.wrapping import (
     Molecules,
@@ -216,7 +217,8 @@ def _finish_satellites(
     PyMOL treats the symbol ``D`` as deuterium: it counts as hydrogen in the
     selection ``hydro``, which would make ``hide (hydro)`` hide the Drudes as well.
     Setting the atomic number to 0 removes them from ``hydro``; ``elem D`` and
-    ``elem M`` select them.
+    ``elem M`` select them. They get the colour and radius of ``drude_style``, but
+    keep their representations.
 
     If PyMOL guessed the bonds itself, ``guessed`` holds the satellite bonds (pairs
     of indices into ``ids``), which replace PyMOL's bonds of the satellites.
@@ -224,9 +226,38 @@ def _finish_satellites(
     if not satellite_mask(elements).any():
         return
     _self.alter(f"{name} and elem {DRUDE}", "protons = 0")
+    colour_satellites(name, _self=_self)
     if guessed is not None:
         _self.unbond(f"{name} and elem {DRUDE}+{VIRTUAL}", name)
         _add_bonds(name, ids, guessed, _self)
+
+
+def _warn_if_deuterium(
+    positions: NDArray[np.float64],
+    satellites: NDArray[np.int64],
+    elements: list[str],
+    box: Box | None,
+) -> None:
+    """Warn if the atoms with element ``D`` sit too far from their host for Drudes.
+
+    A Drude particle sits about 0.01 A from its core, a deuterium about 1 A from
+    its bonded atom; the median over all ``D`` atoms of the first frame decides.
+    """
+    drudes = satellites[np.array(elements)[satellites[:, 0]] == DRUDE]
+    if len(drudes) == 0:
+        return
+    if box is not None:
+        positions = place_satellites(positions, drudes, box)
+    distance = np.median(
+        np.linalg.norm(positions[drudes[:, 0]] - positions[drudes[:, 1]], axis=1)
+    )
+    if distance > DEUTERIUM_DISTANCE:
+        warnings.warn(
+            f"the atoms with element D sit {distance:.2f} A from their bonded atom "
+            "(median), but Drude particles sit about 0.01 A from their core; if "
+            "they are deuterium, load again with drude=0",
+            stacklevel=2,
+        )
 
 
 def _cut_bonds(
@@ -343,9 +374,14 @@ def load_lammps(
     come from masses, a type with 0 < mass < 0.8 g/mol. ``drude=21 22 23`` names the
     Drude atom types instead, ``drude=0`` switches the detection off (a label ``D``
     then means deuterium). A massless site (label ``M`` or mass below 1e-8, the M
-    site of SWM4-NDP water) is a virtual site. Drudes are stored with element ``D``
-    and virtual sites with element ``M``: select them with ``elem D`` and
-    ``elem M``. Their bonds come from the data file; without one, each Drude is
+    site of SWM4-NDP water) is a virtual site. A data file overrides the labels:
+    the types it marks as Drudes (by mass, or by the word ``DP`` in the ``Masses``
+    comment) or as virtual sites are loaded as such, unless ``drude=0``. Drudes are
+    stored with element ``D`` and virtual sites with element ``M``: select them
+    with ``elem D`` and ``elem M``. They get the colour and radius that
+    ``drude_style`` uses, but keep their representations. If the ``D`` atoms sit
+    more than 0.3 A from their host (median), a warning suggests that they are
+    deuterium and ``drude=0``. Their bonds come from the data file; without one, each Drude is
     bonded to its nearest other atom and each virtual site to its nearest oxygen.
     In every frame, also with ``wrap=0``, each of them is shown at the periodic
     image next to its host atom. A dump of the cores only simply has no Drudes.
@@ -426,6 +462,10 @@ def load_lammps(
             else satellite_bonds(first.positions(), topology.elements, first.box),
             topology.elements,
         )
+        if not int(quiet):
+            _warn_if_deuterium(
+                first.positions(), satellites, topology.elements, first.box
+            )
         index = topology.molecule_index()
         molecules = (
             None
@@ -568,8 +608,10 @@ def load_xyz(
     them with ``elem D`` and ``elem M``. Each Drude is bonded to its nearest other
     atom and each virtual site to its nearest oxygen, whatever the distance. With a
     cell they are shown at the periodic image next to that atom in every frame,
-    also with ``wrap=0``. ``drude=0`` reads a label ``D`` as deuterium (element H)
-    instead.
+    also with ``wrap=0``. They get the colour and radius that ``drude_style`` uses,
+    but keep their representations. ``drude=0`` reads a label ``D`` as deuterium
+    (element H) instead; a warning suggests it if the ``D`` atoms sit more than
+    0.3 A from their bonded atom (median).
 
     With ``wrap=1``, bonds longer than half of the smallest cell height (periodic
     images, which PyMOL would draw through the cell) are removed from the display,
@@ -649,6 +691,8 @@ def load_xyz(
         n_atoms = len(elements)
         bonds = guess_bonds(first.positions, elements, first_box)
         satellites = satellite_hosts(bonds, elements)
+        if not int(quiet):
+            _warn_if_deuterium(first.positions, satellites, elements, first_box)
         index = molecule_index(n_atoms, bonds)
         molecules = None
         if first_box is not None:
