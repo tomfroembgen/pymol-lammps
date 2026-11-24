@@ -1,6 +1,8 @@
-"""Load LAMMPS dump trajectories, with optional data files, into PyMOL.
+"""Load LAMMPS dump trajectories and periodic xyz trajectories into PyMOL.
 
-The parsers (``dump``, ``datafile``, ``topology``) depend only on NumPy. The PyMOL
+The commands are ``load_lammps`` (dump files, with optional data file), ``load_xyz``
+(multi-frame xyz files with a cell) and ``lammps_wrap``. The parsers (``dump``,
+``datafile``, ``topology``, ``xyz``, ``bonds``) depend only on NumPy. The PyMOL
 glue lives in ``loader`` and is imported only when registering the commands.
 """
 

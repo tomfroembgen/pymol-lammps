@@ -4,7 +4,9 @@ Load LAMMPS trajectories into PyMOL.
 
 PyMOL cannot read LAMMPS dump files (`.lammpstrj`) out of the box. This add-on
 teaches it to, and optionally reads the LAMMPS data file of the system to get
-elements, atom names, molecules, charges and bonds right.
+elements, atom names, molecules, charges and bonds right. A second command,
+`load_xyz`, loads multi-frame xyz files such as ab initio MD output, which have
+no box and no topology (see [Loading xyz trajectories](#loading-xyz-trajectories)).
 
 ```
 load_lammps traj.lammpstrj, data=system.data
@@ -105,6 +107,65 @@ boundary are first reassembled by walking along the bonds. This needs the bonds
 from a data file for molecules longer than half the box (peptides, polymers).
 
 
+## Loading xyz trajectories
+
+Ab initio molecular dynamics (AIMD) programs usually write the trajectory as a
+multi-frame `.xyz` file. Such a file holds only element symbols and coordinates,
+so PyMOL knows neither the periodic cell nor which atoms form a molecule. The
+command `load_xyz` takes the cell from you (or from the file) and works out the
+molecules itself. It is meant mainly for NVT simulations, in which the cell stays
+constant, but a cell that changes between frames (NpT) is handled as well.
+
+```
+load_xyz aimd.xyz, cell=12.4                      # cubic cell, 12.4 A
+load_xyz aimd.xyz, cell=12.4 12.4 15              # orthorhombic cell
+load_xyz aimd.xyz, cell=12.4,12.4,15,90,90,120    # a b c alpha beta gamma
+load_xyz aimd.xyz, cell=12.4, interval=10, wrap=0
+```
+
+**The cell.** The `cell` argument is a string in Angstrom and degree. One number
+gives a cube, three numbers give the edge lengths a, b and c with right angles,
+and six numbers give a, b, c, alpha, beta and gamma. Numbers are separated by
+spaces or commas. If `cell` is not given, the loader looks for the `Lattice="..."`
+tag in the comment line of each frame of an extended xyz file and uses that cell
+for the frame; this is why a cell that changes between frames works. If a file has a
+`Lattice` and you also give `cell`, the cell argument is used and a warning
+is printed once. If there is no cell at all, no box is drawn and nothing is
+wrapped; `wrap=1` then only prints a warning.
+
+**Bonds and molecules.** With a cell, the loader guesses the bonds from the first
+frame. Two atoms are bonded if their distance, measured with the minimum-image
+convention in the cell, is smaller than the sum of their covalent radii plus
+0.4 A. Because of the minimum image, bonds across the cell boundary are found.
+The molecules are the groups of atoms connected by these bonds. They are stored
+as `resi` (numbered from 1 in the order of their first atom), so `select mol3,
+resi 3` selects the third molecule. The atom name is the element symbol and the
+residue name is empty.
+
+**Wrapping.** xyz files carry no image flags, so a molecule that was cut by the
+cell boundary when the file was written is first put together again, by walking
+along its bonds. Then every molecule is shifted by whole cell vectors so that its
+centre of geometry lies inside the cell, as in `load_lammps`. With `wrap=0` the
+coordinates stay as in the file. The command `lammps_wrap object [, 0|1]` also
+works on objects from `load_xyz` and switches between the two views after loading.
+
+**Limitations.**
+
+- The bonds and molecules are determined once, from the first frame, and kept
+  for all frames. Reactions during the run, such as proton transfer, are therefore
+  not reflected, and a molecule that is already broken in frame 1 stays broken.
+- Without a cell, PyMOL guesses the bonds itself, and `resi` is numbered from
+  plain distances without the minimum image.
+- The cell is drawn as the `<object>_box` object from the cell vectors, and wrapping
+  uses the same vectors. PyMOL's crystal symmetry (`show cell`, `get_symmetry`) can
+  only store lengths and angles. A `Lattice` is used as written in the file and is
+  not rotated into the LAMMPS orientation, so for a cell whose first vector does not
+  point along x the symmetry setting describes the same cell shape but not its
+  orientation. Use the `_box` object for display.
+- The elements must be given in the first column of the xyz file; labels such as
+  `C1` or `HW` are reduced to the element symbol.
+
+
 ## The data file: why `data=` matters
 
 A dump file contains only numbers per frame: atom ID, type number and
@@ -157,6 +218,8 @@ dump TRAJ all custom 1000 traj.lammpstrj id mol type q xu yu zu
 load_lammps filename [, data [, object [, start [, stop [, interval
             [, elements [, box [, wrap ]]]]]]]]
 lammps_wrap object [, wrap ]
+load_xyz filename [, object [, start [, stop [, interval [, cell [, box
+         [, wrap ]]]]]]]
 ```
 
 | Argument | Meaning |
@@ -177,7 +240,13 @@ load_lammps traj.lammpstrj, elements=C H O N                 # no data file
 load_lammps traj.lammpstrj, data=system.data, object=run1, box=0
 ```
 
-From a Python script: `from pymol_lammps.loader import lammps_wrap, load_lammps`.
+For `load_xyz`, the arguments `object`, `start`, `stop`, `interval`, `box` and
+`wrap` mean the same as above, and `cell` is the periodic cell as described in
+[Loading xyz trajectories](#loading-xyz-trajectories). `lammps_wrap` accepts
+objects from both loaders.
+
+From a Python script:
+`from pymol_lammps.loader import lammps_wrap, load_lammps, load_xyz`.
 
 ### What is stored where
 
@@ -210,7 +279,7 @@ select first100, ID 1-100       # LAMMPS atom IDs
 
 | Symptom | Cause and fix |
 |---|---|
-| `load_lammps` is an unknown command | the `.pymolrc` block did not run; check the path in it and restart PyMOL |
+| `load_lammps` or `load_xyz` is an unknown command | the `.pymolrc` block did not run; check the path in it and restart PyMOL |
 | warning "no element known for atom types ..." | give `data=` or `elements=` |
 | long bonds across the box | molecules could not be reassembled: with `wrap=0` and a wrapped dump, or a molecule longer than half the box without a data file. Dump `xu yu zu` (or add `ix iy iz`), or give `data=` |
 | warning "molecules were not wrapped" | no molecule IDs: dump the `mol` column or give `data=` |
@@ -242,7 +311,7 @@ pre-commit install
 pytest
 ```
 
-The parsers (`dump.py`, `datafile.py`, `topology.py`) need only NumPy; the PyMOL
+The parsers (`dump.py`, `datafile.py`, `topology.py`, `xyz.py`, `bonds.py`) need only NumPy; the PyMOL
 commands are in `loader.py`. The tests in `test/test_loader.py` need PyMOL and
 are skipped where it is not importable.
 
