@@ -203,6 +203,25 @@ def test_solid_fallback(loaded: str) -> None:
     assert set(bond_radii()) == {None}
 
 
+def test_solid_bonds_leave_the_hosts_alone(loaded: str) -> None:
+    """In a view of spheres, dashed=0 must not draw the bonds between cores."""
+    cmd.hide("everything", "(d)")
+    cmd.show("spheres", "d")
+    drude_style("d", dashed=0, quiet=1)
+    assert cmd.count_atoms("d and not elem D+M and rep sticks") == 0
+    assert cmd.count_atoms("d and not elem D+M and rep spheres") == 210 - N_SATELLITES
+    assert cmd.count_atoms("d and elem D+M and rep sticks") == N_SATELLITES
+
+
+@pytest.mark.parametrize("selection", ["d_box", "d_drude", "nothere"])
+def test_selection_without_atoms_gives_a_clear_error(
+    loaded: str, selection: str
+) -> None:
+    drude_style("d", quiet=1)
+    with pytest.raises(pymol.CmdException, match="is no atom selection"):
+        drude_style(selection, quiet=1)
+
+
 def test_without_satellites_nothing_happens(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

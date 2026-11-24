@@ -77,8 +77,8 @@ class _Trajectory:
         PyMOL ``ID`` of each atom, in the order of the arrays.
     bonds : NDArray[np.int64] | None
         Bonds given to PyMOL by the loader; None if PyMOL guessed them.
-    elements : list[str]
-        Element of each atom.
+    satellite : NDArray[np.bool_]
+        Which atoms are Drude particles or virtual sites.
     unwrapped : bool
         Whether the file has unwrapped coordinates (never for xyz files).
     removed : NDArray[np.bool_]
@@ -98,7 +98,7 @@ class _Trajectory:
     satellites: NDArray[np.int64]
     ids: list[int]
     bonds: NDArray[np.int64] | None
-    elements: list[str]
+    satellite: NDArray[np.bool_]
     unwrapped: bool
     removed: NDArray[np.bool_]
     xyz: bool = False
@@ -159,7 +159,8 @@ def _displayed(
                     make_whole=not unwrapped,
                     previous=previous,
                 )
-            positions = place_satellites(positions, satellites, box)
+            if len(satellites):
+                positions = place_satellites(positions, satellites, box)
         previous = positions
         yield positions, box
 
@@ -208,7 +209,7 @@ def _remove_bonds(
 def _finish_satellites(
     name: str,
     ids: list[int],
-    elements: list[str],
+    satellite: NDArray[np.bool_],
     guessed: NDArray[np.int64] | None,
     _self: Any,
 ) -> None:
@@ -223,7 +224,7 @@ def _finish_satellites(
     If PyMOL guessed the bonds itself, ``guessed`` holds the satellite bonds (pairs
     of indices into ``ids``), which replace PyMOL's bonds of the satellites.
     """
-    if not satellite_mask(elements).any():
+    if not satellite.any():
         return
     _self.alter(f"{name} and elem {DRUDE}", "protons = 0")
     colour_satellites(name, _self=_self)
@@ -243,7 +244,9 @@ def _warn_if_deuterium(
     A Drude particle sits about 0.01 A from its core, a deuterium about 1 A from
     its bonded atom; the median over all ``D`` atoms of the first frame decides.
     """
-    drudes = satellites[np.array(elements)[satellites[:, 0]] == DRUDE]
+    if len(satellites) == 0:
+        return
+    drudes = satellites[np.asarray(elements)[satellites[:, 0]] == DRUDE]
     if len(drudes) == 0:
         return
     if box is not None:
@@ -263,7 +266,7 @@ def _warn_if_deuterium(
 def _cut_bonds(
     coordinates: NDArray[np.float64],
     bonds: NDArray[np.int64] | None,
-    elements: list[str],
+    satellite: NDArray[np.bool_],
     box: Box | None,
     check: bool,
 ) -> NDArray[np.bool_]:
@@ -276,7 +279,7 @@ def _cut_bonds(
         return np.zeros(0, dtype=bool)
     if not check or box is None:
         return np.zeros(len(bonds), dtype=bool)
-    return periodic_bonds(coordinates, bonds, elements, box)
+    return periodic_bonds(coordinates, bonds, satellite, box)
 
 
 def _load_states(
@@ -299,7 +302,7 @@ def _load_states(
         if box is not None:
             _set_box(name, box, n_states, show_box, _self)
         cut |= _cut_bonds(
-            coordinates, trajectory.bonds, trajectory.elements, box, check
+            coordinates, trajectory.bonds, trajectory.satellite, box, check
         )
     if trajectory.bonds is not None:
         # Periodic networks keep the cut of the first frame, so this is rare: a
@@ -381,8 +384,9 @@ def load_lammps(
     with ``elem D`` and ``elem M``. They get the colour and radius that
     ``drude_style`` uses, but keep their representations. If the ``D`` atoms sit
     more than 0.3 A from their host (median), a warning suggests that they are
-    deuterium and ``drude=0``. Their bonds come from the data file; without one, each Drude is
-    bonded to its nearest other atom and each virtual site to its nearest oxygen.
+    deuterium and ``drude=0``. Their bonds come from the data file; without one,
+    and for satellites that have no bond in it, each Drude is bonded to its nearest
+    other atom and each virtual site to its nearest oxygen.
     In every frame, also with ``wrap=0``, each of them is shown at the periodic
     image next to its host atom. A dump of the cores only simply has no Drudes.
     ``drude_style`` draws them.
@@ -455,16 +459,30 @@ def load_lammps(
         topology = build_topology(
             first, data_file, type_elements or None, parse_drude(drude)
         )
+        # Parsing the coordinates is costly; the first frame is used several times.
+        first_positions = first.positions()
+        satellite = satellite_mask(topology.elements)
         bonds = topology.bonds
+        if bonds is not None:
+            # A satellite without a bond in the data file (an M site held by fix
+            # rigid, for example) is bonded to its nearest host like without one.
+            unbonded = satellite.copy()
+            unbonded[bonds.ravel()] = False
+            if unbonded.any():
+                extra = satellite_bonds(
+                    first_positions, topology.elements, first.box, only=unbonded
+                )
+                bonds = np.concatenate([bonds, extra])
+                topology = replace(topology, bonds=bonds)
         satellites = satellite_hosts(
             bonds
             if bonds is not None
-            else satellite_bonds(first.positions(), topology.elements, first.box),
+            else satellite_bonds(first_positions, topology.elements, first.box),
             topology.elements,
         )
         if not int(quiet):
             _warn_if_deuterium(
-                first.positions(), satellites, topology.elements, first.box
+                first_positions, satellites, topology.elements, first.box
             )
         index = topology.molecule_index()
         molecules = (
@@ -479,7 +497,7 @@ def load_lammps(
             # in one piece and is shifted as a whole.
             half = cell_heights(first.box).min() / 2
             molecules, n_periodic = split_wrapping_molecules(
-                first.positions(),
+                first_positions,
                 molecules,
                 first.box,
                 bonds,
@@ -499,13 +517,13 @@ def load_lammps(
         # by the boundary as the file has them, with their long bonds.
         check = do_wrap or first.unwrapped
 
-        raw = (
-            (frame.positions(), frame.box, frame.unwrapped)
-            for frame in itertools.chain([first], frames)
+        raw = itertools.chain(
+            [(first_positions, first.box, first.unwrapped)],
+            ((frame.positions(), frame.box, frame.unwrapped) for frame in frames),
         )
         states = _displayed(raw, molecules, satellites, do_wrap)
         coordinates, _ = next(states)
-        cut = _cut_bonds(coordinates, bonds, topology.elements, first.box, check)
+        cut = _cut_bonds(coordinates, bonds, satellite, first.box, check)
 
         _self.delete(f"{name} {name}_box {name}_drude")
         model = _chempy_model(
@@ -519,11 +537,7 @@ def load_lammps(
         if bonds is None:
             _self.rebond(name, 1, pbc=0)
         _finish_satellites(
-            name,
-            ids,
-            topology.elements,
-            None if bonds is not None else satellites,
-            _self,
+            name, ids, satellite, None if bonds is not None else satellites, _self
         )
         _set_box(name, first.box, 1, show_box, _self)
 
@@ -536,7 +550,7 @@ def load_lammps(
             satellites,
             ids,
             bonds,
-            topology.elements,
+            satellite,
             first.unwrapped,
             cut,
         )
@@ -690,6 +704,7 @@ def load_xyz(
 
         n_atoms = len(elements)
         bonds = guess_bonds(first.positions, elements, first_box)
+        satellite = satellite_mask(elements)
         satellites = satellite_hosts(bonds, elements)
         if not int(quiet):
             _warn_if_deuterium(first.positions, satellites, elements, first_box)
@@ -740,7 +755,7 @@ def load_xyz(
         coordinates, _ = next(states)
         # With wrap=0 the file coordinates are shown as they are, molecules cut by
         # the boundary included.
-        cut = _cut_bonds(coordinates, topology.bonds, elements, first_box, do_wrap)
+        cut = _cut_bonds(coordinates, topology.bonds, satellite, first_box, do_wrap)
 
         _self.delete(f"{name} {name}_box {name}_drude")
         model = _chempy_model(
@@ -758,7 +773,7 @@ def load_xyz(
         _finish_satellites(
             name,
             ids,
-            elements,
+            satellite,
             None if topology.bonds is not None else satellites,
             _self,
         )
@@ -774,7 +789,7 @@ def load_xyz(
             satellites,
             ids,
             topology.bonds,
-            elements,
+            satellite,
             False,
             cut,
             xyz=True,
@@ -875,7 +890,7 @@ def lammps_wrap(
         cut = np.zeros_like(trajectory.removed)
         for coordinates, box in states:
             cut |= _cut_bonds(
-                coordinates, trajectory.bonds, trajectory.elements, box, check
+                coordinates, trajectory.bonds, trajectory.satellite, box, check
             )
             # PyMOL keeps single precision.
             coordinate_sets.append(coordinates.astype(np.float32))

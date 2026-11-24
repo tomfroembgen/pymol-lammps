@@ -23,7 +23,7 @@ import itertools
 import numpy as np
 from numpy.typing import NDArray
 
-from pymol_lammps.drude import SATELLITES, VIRTUAL, satellite_mask
+from pymol_lammps.drude import DRUDE, SATELLITES, VIRTUAL
 from pymol_lammps.dump import Box
 
 # Covalent radii in Angstrom (Cordero et al., Dalton Trans. 2008, 2832; single-bond,
@@ -113,7 +113,7 @@ def bond_limits(elements: list[str], bonds: NDArray[np.int64]) -> NDArray[np.flo
 def periodic_bonds(
     positions: NDArray[np.float64],
     bonds: NDArray[np.int64],
-    elements: list[str],
+    satellite: NDArray[np.bool_],
     box: Box,
 ) -> NDArray[np.bool_]:
     """Find the bonds that PyMOL would draw through the cell.
@@ -130,8 +130,8 @@ def periodic_bonds(
         Displayed Cartesian positions in Angstrom, shape (n_atoms, 3).
     bonds : NDArray[np.int64]
         Bonded atom pairs, shape (n_bonds, 2).
-    elements : list[str]
-        Element symbol of each atom, with ``D`` and ``M`` for the satellites.
+    satellite : NDArray[np.bool_]
+        Which atoms are Drude particles or virtual sites, shape (n_atoms,).
     box : Box
         Periodic cell of the frame.
 
@@ -142,7 +142,7 @@ def periodic_bonds(
     """
     length = np.linalg.norm(positions[bonds[:, 0]] - positions[bonds[:, 1]], axis=1)
     too_long = length > cell_heights(box).min() / 2
-    return too_long & ~satellite_mask(elements)[bonds].any(axis=1)
+    return too_long & ~satellite[bonds].any(axis=1)
 
 
 def _distance_block(
@@ -214,20 +214,20 @@ def _neighbour_pairs(
         Query atom, candidate atom and distance of each pair closer than ``cutoff``.
     """
     periodic = box is not None
-    if box is None:
+    grid = box
+    if grid is None:
         # A non-periodic grid over the extent of the atoms.
         extent = np.maximum(np.ptp(positions, axis=0), cutoff)
-        box = Box(origin=positions.min(axis=0), matrix=np.diag(extent))
-    fractional = (positions - box.origin) @ np.linalg.inv(box.matrix).T
-    if periodic:
-        fractional -= np.floor(fractional)
-    n_cells = np.maximum((cell_heights(box) / cutoff).astype(np.int64), 1)
+        grid = Box(origin=positions.min(axis=0), matrix=np.diag(extent))
+    fractional = (positions - grid.origin) @ np.linalg.inv(grid.matrix).T
+    in_cell = fractional - np.floor(fractional) if periodic else fractional
+    n_cells = np.maximum((cell_heights(grid) / cutoff).astype(np.int64), 1)
     # Few cells per atom are enough; larger cells only add candidates to test.
     limit = 8 * len(candidates) + 27
     if n_cells.prod() > limit:
         scale = (limit / n_cells.prod()) ** (1 / 3)
         n_cells = np.maximum((n_cells * scale).astype(np.int64), 1)
-    cells = np.minimum((fractional * n_cells).astype(np.int64), n_cells - 1)
+    cells = np.minimum((in_cell * n_cells).astype(np.int64), n_cells - 1)
 
     keys = np.ravel_multi_index(tuple(cells[candidates].T), tuple(n_cells))
     by_cell = candidates[np.argsort(keys, kind="stable")]
@@ -257,17 +257,18 @@ def _neighbour_pairs(
     query = np.concatenate(query_parts)
     candidate = np.concatenate(candidate_parts)
 
-    delta = fractional[candidate] - fractional[query]
-    if periodic:
+    if box is None:
+        distance = np.linalg.norm(positions[candidate] - positions[query], axis=1)
+    else:
+        delta = fractional[candidate] - fractional[query]
         delta -= np.round(delta)
-    distance = np.linalg.norm(delta @ box.matrix.T, axis=1)
+        distance = np.linalg.norm(delta @ box.matrix.T, axis=1)
     close = distance < cutoff
     return query[close], candidate[close], distance[close]
 
 
 def _nearest(
     positions: NDArray[np.float64],
-    elements: list[str],
     queries: NDArray[np.int64],
     candidates: NDArray[np.int64],
     box: Box | None,
@@ -275,7 +276,7 @@ def _nearest(
     """Return the nearest candidate atom of each query atom (minimum image in a box).
 
     The cell list finds the nearest candidate within ``HOST_SEARCH_RADIUS``; query
-    atoms without one are compared with all candidates.
+    atoms without one are compared with all candidates (``_nearest_of_all``).
     """
     radius = HOST_SEARCH_RADIUS
     if box is not None:
@@ -290,17 +291,44 @@ def _nearest(
     nearest = np.full(len(positions), -1)
     nearest[query[closest]] = candidate[closest]
 
-    far = queries[nearest[queries] < 0]
-    coordinates, shifts = _search_setup(positions, elements, box)
-    for lo in range(0, len(far), _CHUNK):
-        rows = far[lo : lo + _CHUNK]
-        distances = _distance_block(coordinates, rows, box, shifts)[:, candidates]
-        nearest[rows] = candidates[np.argmin(distances, axis=1)]
+    for atom in queries[nearest[queries] < 0]:
+        nearest[atom] = _nearest_of_all(positions, atom, candidates, box)
     return nearest[queries]
 
 
+def _nearest_of_all(
+    positions: NDArray[np.float64],
+    atom: int,
+    candidates: NDArray[np.int64],
+    box: Box | None,
+) -> int:
+    """Return the nearest of all candidates to one atom, with the exact minimum image.
+
+    Rounding the fractional difference gives an image at distance ``bound``. The
+    nearest image is at most ``bound`` away, so its fractional coordinate along
+    each cell vector differs from the rounded one by at most
+    ``bound / height + 1/2``; all these images are tested. This is exact also in
+    strongly skewed cells, and cheap because few atoms need it.
+    """
+    if box is None:
+        delta = positions[candidates] - positions[atom]
+        return int(candidates[np.argmin(np.linalg.norm(delta, axis=1))])
+    inverse = np.linalg.inv(box.matrix).T
+    fractional = (positions[candidates] - positions[atom]) @ inverse
+    fractional -= np.round(fractional)
+    distance = np.linalg.norm(fractional @ box.matrix.T, axis=1)
+    reach = np.ceil(distance.min() / cell_heights(box) + 0.5).astype(np.int64)
+    for shift in itertools.product(*(range(-r, r + 1) for r in reach)):
+        shifted = np.linalg.norm((fractional + shift) @ box.matrix.T, axis=1)
+        distance = np.minimum(distance, shifted)
+    return int(candidates[np.argmin(distance)])
+
+
 def satellite_bonds(
-    positions: NDArray[np.float64], elements: list[str], box: Box | None = None
+    positions: NDArray[np.float64],
+    elements: list[str],
+    box: Box | None = None,
+    only: NDArray[np.bool_] | None = None,
 ) -> NDArray[np.int64]:
     """Bond each Drude particle and virtual site to its host atom.
 
@@ -318,17 +346,24 @@ def satellite_bonds(
         Element symbol of each atom, with ``D`` and ``M`` for the satellites.
     box : Box | None, optional
         Periodic cell for the minimum-image convention. None uses plain distances.
+    only : NDArray[np.bool_] | None, optional
+        Bond only the satellites marked here, shape (n_atoms,); None for all.
 
     Returns
     -------
     NDArray[np.int64]
         One pair ``(i, j)`` with ``i < j`` per satellite, shape (n_satellites, 2).
     """
-    satellite = satellite_mask(elements)
+    symbols = np.asarray(elements)
+    satellite = np.isin(symbols, [DRUDE, VIRTUAL])
     cores = ~satellite
-    oxygen = cores & (np.array(elements) == "O")
-    virtual = np.array(elements) == VIRTUAL
+    if only is not None:
+        satellite &= only
     pairs: list[NDArray[np.int64]] = [np.empty((0, 2), dtype=np.int64)]
+    if not satellite.any():
+        return pairs[0]
+    oxygen = cores & (symbols == "O")
+    virtual = satellite & (symbols == VIRTUAL)
     # Virtual sites choose among oxygens if there are any.
     for members, allowed in (
         (satellite & ~virtual, cores),
@@ -337,11 +372,46 @@ def satellite_bonds(
         queries = np.flatnonzero(members)
         candidates = np.flatnonzero(allowed)
         if len(queries) and len(candidates):
-            hosts = _nearest(positions, elements, queries, candidates, box)
+            hosts = _nearest(positions, queries, candidates, box)
             pairs.append(np.column_stack([queries, hosts]).astype(np.int64))
     # In the order of the satellites, each pair sorted.
     found = np.concatenate(pairs)
     return np.sort(found[np.argsort(found[:, 0])], axis=1)
+
+
+def _bonds_by_radii(
+    positions: NDArray[np.float64], elements: list[str], box: Box | None
+) -> NDArray[np.int64]:
+    """Return the pairs closer than their covalent radii plus tolerance (``i < j``).
+
+    Ions and satellites are never bonded by radii, so they are left out before any
+    distance is computed.
+    """
+    radii = _radii(elements)
+    kept = np.flatnonzero(~np.isin(np.asarray(elements), [*IONS, *SATELLITES]))
+    if len(kept) == 0:
+        return np.empty((0, 2), dtype=np.int64)
+    cutoff = max_bond_limit(elements)
+    if box is None or cutoff < cell_heights(box).min() / 2:
+        # Each bonded pair is closer than the largest limit, so a cell list finds
+        # all of them; rounding gives the minimum image at these distances.
+        i, j, distance = _neighbour_pairs(positions, kept, kept, box, cutoff)
+        limit = radii[i] + radii[j] + BOND_TOLERANCE
+        bonded = (distance < limit) & (distance > MIN_DISTANCE) & (i < j)
+        return np.column_stack([i[bonded], j[bonded]]).astype(np.int64)
+    coordinates, shifts = _search_setup(positions[kept], elements, box)
+    columns = np.arange(len(kept))
+    pairs: list[NDArray[np.int64]] = [np.empty((0, 2), dtype=np.int64)]
+    for lo in range(0, len(kept), _CHUNK):
+        hi = min(lo + _CHUNK, len(kept))
+        distance = _distance_block(coordinates, np.arange(lo, hi), box, shifts)
+        limit = radii[kept[lo:hi], None] + radii[None, kept] + BOND_TOLERANCE
+        bonded = (distance < limit) & (distance > MIN_DISTANCE)
+        # Each pair once: keep the upper triangle.
+        bonded &= columns[None, :] > np.arange(lo, hi)[:, None]
+        i, j = np.nonzero(bonded)
+        pairs.append(np.column_stack([kept[i + lo], kept[j]]).astype(np.int64))
+    return np.concatenate(pairs)
 
 
 def guess_bonds(
@@ -349,13 +419,15 @@ def guess_bonds(
 ) -> NDArray[np.int64]:
     """Find bonded atom pairs from covalent radii.
 
-    The search runs in blocks of atoms, so memory stays small for several thousand
-    atoms. The minimum image is found by rounding the fractional difference. In a
-    strongly skewed cell this is the nearest image only if the distance is below half
-    of the smallest cell height (``cell_heights``); then the 26 neighbouring images
-    are tested as well, which is slower. Drude particles and virtual sites are
-    bonded to their host atom by ``satellite_bonds`` and take no part in the search
-    by radii.
+    The minimum image is found by rounding the fractional difference. This is the
+    nearest image if the distance is below half of the smallest cell height
+    (``cell_heights``). Usually the longest possible bond is shorter than that, and
+    a cell list limits the search to nearby atoms, so the time grows linearly with
+    the number of atoms. In a strongly skewed cell all pairs are compared instead,
+    in blocks of atoms to keep the memory small, and the 26 neighbouring images are
+    tested as well. Ions, Drude particles and virtual sites take no part in the
+    search by radii; the satellites are bonded to their host atom by
+    ``satellite_bonds``.
 
     Parameters
     ----------
@@ -371,24 +443,10 @@ def guess_bonds(
     NDArray[np.int64]
         Bonded atom pairs ``(i, j)`` with ``i < j``, shape (n_bonds, 2).
     """
-    n_atoms = len(positions)
-    radii = _radii(elements)
-    coordinates, shifts = _search_setup(positions, elements, box)
-    # Ions and satellites are never bonded by radii.
-    excluded = np.array([e in IONS or e in SATELLITES for e in elements])
-    pairs: list[NDArray[np.int64]] = [np.empty((0, 2), dtype=np.int64)]
-    columns = np.arange(n_atoms)
-    for lo in range(0, n_atoms, _CHUNK):
-        hi = min(lo + _CHUNK, n_atoms)
-        distance = _distance_block(coordinates, np.arange(lo, hi), box, shifts)
-        limit = radii[lo:hi, None] + radii[None, :] + BOND_TOLERANCE
-        bonded = (distance < limit) & (distance > MIN_DISTANCE)
-        # Each pair once: keep the upper triangle.
-        bonded &= columns[None, :] > np.arange(lo, hi)[:, None]
-        bonded &= ~(excluded[lo:hi, None] | excluded[None, :])
-        i, j = np.nonzero(bonded)
-        pairs.append(np.column_stack([i + lo, j]).astype(np.int64))
-    pairs.append(satellite_bonds(positions, elements, box))
+    pairs = [
+        _bonds_by_radii(positions, elements, box),
+        satellite_bonds(positions, elements, box),
+    ]
     result = np.concatenate(pairs)
     return result[np.lexsort((result[:, 1], result[:, 0]))]
 

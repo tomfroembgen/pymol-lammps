@@ -110,10 +110,10 @@ def test_periodic_bonds_function() -> None:
     box = Box(origin=np.zeros(3), matrix=np.eye(3) * BOX)
     positions = np.array([[0.1, 0, 0], [8.8, 0, 0], [8.9, 0, 0], [3.0, 0, 0]], float)
     bonds = np.array([[0, 1], [1, 2], [2, 3]])
-    elements = ["C", "C", "C", "D"]
+    satellite = np.array([False, False, False, True])
     # Bond 0-1 is 8.7 A long, bond 1-2 is short, and the long bond 2-3 involves a
     # Drude, which is never removed.
-    assert periodic_bonds(positions, bonds, elements, box).tolist() == [
+    assert periodic_bonds(positions, bonds, satellite, box).tolist() == [
         True,
         False,
         False,

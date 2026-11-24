@@ -87,6 +87,16 @@ def _positions_in(
     return np.where(sorted_ids[index] == query, index, -1)
 
 
+def _override(
+    labels: list[str], types: NDArray[np.int64], marked: dict[int, str]
+) -> list[str]:
+    """Replace the label of every atom whose type is in ``marked`` by its mark."""
+    result = np.array(labels, dtype=object)
+    for atom_type, mark in marked.items():
+        result[types == atom_type] = mark
+    return result.tolist()
+
+
 def _elements(
     frame: Frame,
     types: NDArray[np.int64],
@@ -121,10 +131,10 @@ def _elements(
                 f"type {types.max()}; give one element per atom type, in type order"
             )
         labels = label_sites([type_elements[t - 1] for t in types], types, drude)
-        return [marked.get(int(t), label) for t, label in zip(types, labels)]
+        return _override(labels, types, marked)
     if "element" in frame.columns:
         labels = label_sites(frame.column("element").tolist(), types, drude)
-        return [marked.get(int(t), label) for t, label in zip(types, labels)]
+        return _override(labels, types, marked)
 
     if "mass" in frame.columns:
         masses = frame.column("mass").astype(float)
@@ -134,7 +144,7 @@ def _elements(
         # Without any mass, "massless" must not be concluded from a placeholder.
         masses = np.full(len(types), np.nan)
     sites = mass_sites(types, masses, drude)
-    sites = np.array([marked.get(int(t), site) for t, site in zip(types, sites)])
+    sites = np.array(_override(sites.tolist(), types, marked))
     drude_masses = masses[sites == "D"]
     if data is not None:
         # A dump of the cores only has no Drudes; their mass is in the data file.

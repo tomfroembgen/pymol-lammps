@@ -150,7 +150,7 @@ def data_sites(
 
 def satellite_mask(elements: Sequence[str]) -> NDArray[np.bool_]:
     """Return which atoms are Drude particles or virtual sites."""
-    return np.array([e in SATELLITES for e in elements], dtype=bool)
+    return np.isin(np.asarray(elements), [DRUDE, VIRTUAL])
 
 
 def label_sites(
@@ -173,15 +173,16 @@ def label_sites(
         The labels, with ``D`` for Drude particles and ``M`` for virtual sites.
         With ``drude=0`` a label ``D`` becomes ``H`` (deuterium).
     """
-    elements = []
-    for label, atom_type in zip(labels, types):
-        symbol = label.upper() if label.upper() in SATELLITES else label
-        if setting.mode == "types" and int(atom_type) in setting.types:
-            symbol = DRUDE
-        elif symbol == DRUDE and setting.mode == "off":
-            symbol = "H"
-        elements.append(symbol)
-    return elements
+    # The rules depend only on the label and the type, so they are applied to each
+    # distinct label once.
+    unique, inverse = np.unique(np.asarray(labels), return_inverse=True)
+    symbols = [u.upper() if u.upper() in SATELLITES else str(u) for u in unique]
+    if setting.mode == "off":
+        symbols = ["H" if symbol == DRUDE else symbol for symbol in symbols]
+    elements = np.array(symbols, dtype=object)[inverse]
+    if setting.mode == "types":
+        elements[np.isin(types, list(setting.types))] = DRUDE
+    return elements.tolist()
 
 
 def mass_sites(
@@ -215,7 +216,7 @@ def mass_sites(
 def satellite_hosts(
     bonds: NDArray[np.int64], elements: Sequence[str]
 ) -> NDArray[np.int64]:
-    """Return the bonds that involve a Drude particle or a virtual site, satellite first.
+    """Return the bonds of the Drude particles and virtual sites, satellite first.
 
     Parameters
     ----------

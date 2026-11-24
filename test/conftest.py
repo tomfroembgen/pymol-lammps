@@ -8,7 +8,11 @@ import gzip
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+import numpy as np
 import pytest
+from numpy.typing import NDArray
+
+from pymol_lammps.datafile import DataFile, read_data
 
 WATER_DATA = """\
 created by fftool
@@ -127,3 +131,17 @@ def water_dump(write_file: Callable[[str, str], Path]) -> Path:
         + water_frame(200, 2.0, [2, 4, 0, 1, 3, 5])
     )
     return write_file("water.lammpstrj", text)
+
+
+@pytest.fixture(scope="module")
+def drude_data() -> DataFile:
+    """Data file of the Drude fixtures (see ``drude_helpers.py``)."""
+    return read_data(Path(__file__).parent / "data" / "drude.data")
+
+
+@pytest.fixture(scope="module")
+def drude_pairs(drude_data: DataFile) -> NDArray[np.int64]:
+    """Core-Drude and O-M bonds of the Drude fixtures as atom indices, Drude first."""
+    bonds = drude_data.bonds - 1
+    satellite = drude_data.types >= 20
+    return bonds[satellite[bonds].any(axis=1)]
