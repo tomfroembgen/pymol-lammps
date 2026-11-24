@@ -158,3 +158,6 @@ dmypy.json
 
 # session handoff documents
 .handoff/
+
+# Claude Code worktrees
+.claude/
