@@ -72,6 +72,63 @@ class Box:
         )
         return cls(origin=np.array([xlo, ylo, zlo]), matrix=matrix)
 
+    @classmethod
+    def from_cell_parameters(
+        cls,
+        a: float,
+        b: float | None = None,
+        c: float | None = None,
+        alpha: float = 90.0,
+        beta: float = 90.0,
+        gamma: float = 90.0,
+    ) -> "Box":
+        """Build a box at the origin from cell lengths and angles.
+
+        Parameters
+        ----------
+        a : float
+            Length of the first box vector in Angstrom.
+        b : float | None, optional
+            Length of the second box vector; defaults to ``a``.
+        c : float | None, optional
+            Length of the third box vector; defaults to ``a``.
+        alpha, beta, gamma : float, optional
+            Angles between b and c, a and c, a and b in degree.
+
+        Returns
+        -------
+        Box
+            The box in the LAMMPS convention (a along x, b in the xy plane).
+
+        Raises
+        ------
+        ValueError
+            If a length is not positive or the angles cannot form a cell.
+        """
+        b = a if b is None else b
+        c = a if c is None else c
+        if min(a, b, c) <= 0:
+            raise ValueError(f"cell lengths must be positive, got {a} {b} {c}")
+        if not all(0 < angle < 180 for angle in (alpha, beta, gamma)):
+            raise ValueError(
+                f"cell angles must lie between 0 and 180 degree, got "
+                f"{alpha} {beta} {gamma}"
+            )
+        cos_a, cos_b, cos_g = np.cos(np.radians([alpha, beta, gamma]))
+        sin_g = np.sin(np.radians(gamma))
+        cx = c * cos_b
+        cy = c * (cos_a - cos_b * cos_g) / sin_g
+        cz_squared = c**2 - cx**2 - cy**2
+        if cz_squared <= 1e-12 * c**2:
+            raise ValueError(
+                f"the angles {alpha} {beta} {gamma} degree do not describe a "
+                "three-dimensional cell"
+            )
+        matrix = np.array(
+            [[a, b * cos_g, cx], [0.0, b * sin_g, cy], [0.0, 0.0, np.sqrt(cz_squared)]]
+        )
+        return cls(origin=np.zeros(3), matrix=matrix)
+
     def cell_parameters(self) -> tuple[float, float, float, float, float, float]:
         """Return the cell lengths (Angstrom) and angles (degree).
 
@@ -114,6 +171,38 @@ class Box:
             for p, q in itertools.combinations(corners, 2)
             if sum(i != j for i, j in zip(p, q)) == 1
         ]
+
+
+def parse_cell(text: str) -> Box:
+    """Build a box from a user string of cell parameters.
+
+    Parameters
+    ----------
+    text : str
+        One number (cube), three numbers (a b c, right angles) or six numbers
+        (a b c alpha beta gamma), separated by whitespace and/or commas. Lengths
+        are in Angstrom, angles in degree.
+
+    Returns
+    -------
+    Box
+        The box, see ``Box.from_cell_parameters``.
+
+    Raises
+    ------
+    ValueError
+        If the string does not hold 1, 3 or 6 numbers, or the cell is invalid.
+    """
+    try:
+        values = [float(token) for token in text.replace(",", " ").split()]
+    except ValueError:
+        raise ValueError(f"cell {text!r} must contain only numbers") from None
+    if len(values) not in (1, 3, 6):
+        raise ValueError(
+            f"cell {text!r} has {len(values)} numbers; give 1 (a), 3 (a b c) or "
+            "6 (a b c alpha beta gamma)"
+        )
+    return Box.from_cell_parameters(*values)
 
 
 @dataclass(frozen=True)
