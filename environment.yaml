@@ -6,6 +6,7 @@ channels:
 dependencies:
   - python=3.14
   - numpy
+  - pandas
   - pymol-open-source
   - coverage
   - mypy
