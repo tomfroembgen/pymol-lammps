@@ -149,3 +149,21 @@ def test_general_triclinic_box_raises(write_file: WriteFile) -> None:
 
     with pytest.raises(ValueError, match="general triclinic"):
         list(read_frames(path))
+
+
+def test_padded_fields_are_read(write_file: WriteFile) -> None:
+    # dump_modify format with field widths gives several spaces between values.
+    text = frame_text("id type x y z", [[1, 1, 0.5, 1.5, 2.5], [2, 2, 3.5, 4.5, 5.5]])
+    path = write_file("t.lammpstrj", text.replace(" 0.5", "   0.5"))
+
+    frame = next(read_frames(path))
+
+    np.testing.assert_array_equal(frame.ids, [1, 2])
+    np.testing.assert_allclose(frame.positions(), [[0.5, 1.5, 2.5], [3.5, 4.5, 5.5]])
+
+
+def test_later_frames_keep_only_numeric_columns(water_dump: Path) -> None:
+    first, second, _ = read_frames(water_dump)
+
+    assert "type" in first.columns
+    assert second.columns == ["id", "x", "y", "z"]

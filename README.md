@@ -18,8 +18,9 @@ load_lammps traj.lammpstrj, data=system.data
 - Whole molecules are wrapped into the box of each frame (switchable).
 - Atoms are matched by LAMMPS atom ID in every frame, so dumps written without
   `dump_modify sort id` load correctly.
-- Pure Python (NumPy only, which ships with PyMOL): no compiling, and it keeps
-  working when PyMOL is updated.
+- Pure Python (NumPy and pandas; NumPy ships with PyMOL, pandas may need to be
+  installed into the Python of your PyMOL, see [Installation](#installation)): no
+  compiling, and it keeps working when PyMOL is updated.
 
 Tested with open-source PyMOL 3.1 (Homebrew and conda-forge) on macOS. It should
 work with the Schrödinger (incentive) PyMOL, but that is untested.
@@ -27,13 +28,17 @@ work with the Schrödinger (incentive) PyMOL, but that is untested.
 
 ## Installation
 
-1. Get the code (any location works):
+1. Make sure the Python of your PyMOL has pandas (it reads the dump files). If
+   PyMOL reports `No module named 'pandas'`, install it into that Python, for
+   example with `pip install pandas`, or `conda install pandas` for a conda PyMOL.
+
+2. Get the code (any location works):
 
    ```
    git clone https://github.com/tomfroembgen/pymol-lammps.git ~/Software/pymol-lammps
    ```
 
-2. Add these lines to the end of `~/.pymolrc` (create the file if it does not
+3. Add these lines to the end of `~/.pymolrc` (create the file if it does not
    exist; on Windows it is `pymolrc.pml` in your home folder). Adjust the path
    if you cloned elsewhere:
 
@@ -48,7 +53,7 @@ work with the Schrödinger (incentive) PyMOL, but that is untested.
    python end
    ```
 
-3. Restart PyMOL and check:
+4. Restart PyMOL and check:
 
    ```
    help load_lammps
@@ -535,9 +540,9 @@ pytest
 ```
 
 The modules `dump.py`, `datafile.py`, `topology.py`, `xyz.py`, `bonds.py`,
-`drude.py` and `wrapping.py` need only NumPy; the PyMOL commands are in `loader.py`
+`drude.py` and `wrapping.py` need only NumPy and pandas; the PyMOL commands are in `loader.py`
 and `style.py`. The tests in `test_loader.py`, `test_load_xyz.py`,
 `test_drude_loading.py`, `test_periodic_bonds.py` and `test_style.py` need PyMOL and
-are skipped where it is not importable; all other tests need only NumPy.
+are skipped where it is not importable; all other tests need only NumPy and pandas.
 
 License: MIT (see `LICENSE.md`). Author: Tom Frömbgen.

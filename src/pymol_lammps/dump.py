@@ -6,14 +6,16 @@ so frames cannot be stacked without this reordering.
 """
 
 import gzip
+import io
 import itertools
 import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
 # Position column sets, from most to least preferred for visualisation. Unwrapped
@@ -25,6 +27,12 @@ _POSITION_COLUMNS = (
     (("xs", "ys", "zs"), True),
 )
 _IMAGE_COLUMNS = ("ix", "iy", "iz")
+# Columns that are parsed to numbers, and are the only ones read after the first frame.
+# All other columns (type, element, mol, q, mass, ...) are only needed to build the
+# topology, and are kept as the text written in the file.
+_NUMERIC_COLUMNS = frozenset(
+    {"id", *_IMAGE_COLUMNS, *(name for names, _ in _POSITION_COLUMNS for name in names)}
+)
 
 
 @dataclass(frozen=True)
@@ -223,19 +231,24 @@ class Frame:
         LAMMPS timestep.
     box : Box
         Simulation box.
-    columns : list[str]
-        Column names from the ``ITEM: ATOMS`` line.
-    table : NDArray[np.str_]
-        Per-atom values as strings, shape (n_atoms, n_columns), sorted by atom ID.
+    data : pd.DataFrame
+        Per-atom columns, sorted by atom ID. ``id`` is integer, positions and image
+        flags are floats, and every other column holds the strings of the file. Only
+        the first frame of a trajectory holds all dump columns; later frames hold
+        the numeric ones.
     """
 
     timestep: int
     box: Box
-    columns: list[str]
-    table: NDArray[np.str_]
+    data: pd.DataFrame
 
-    def column(self, name: str) -> NDArray[np.str_]:
-        """Return one column as strings.
+    @property
+    def columns(self) -> list[str]:
+        """Names of the columns held by this frame."""
+        return self.data.columns.tolist()
+
+    def column(self, name: str) -> NDArray[Any]:
+        """Return one column.
 
         Parameters
         ----------
@@ -244,15 +257,16 @@ class Frame:
 
         Returns
         -------
-        NDArray[np.str_]
-            Values sorted by atom ID.
+        NDArray[Any]
+            Values sorted by atom ID: integers for ``id``, floats for positions and
+            image flags, strings for all other columns.
         """
-        return self.table[:, self.columns.index(name)]
+        return self.data[name].to_numpy()
 
     @property
     def ids(self) -> NDArray[np.int64]:
         """Atom IDs in ascending order."""
-        return self.column("id").astype(np.int64)
+        return self.column("id")
 
     def _position_columns(self) -> tuple[tuple[str, str, str], bool]:
         """Return the preferred position columns and whether they are scaled."""
@@ -283,12 +297,10 @@ class Frame:
             Positions, shape (n_atoms, 3), sorted by atom ID.
         """
         names, scaled = self._position_columns()
-        xyz = np.column_stack([self.column(name) for name in names]).astype(float)
+        xyz = np.column_stack([self.column(name) for name in names])
         wrapped = not names[0].endswith("u")
         if wrapped and all(name in self.columns for name in _IMAGE_COLUMNS):
-            images = np.column_stack([self.column(n) for n in _IMAGE_COLUMNS]).astype(
-                float
-            )
+            images = np.column_stack([self.column(n) for n in _IMAGE_COLUMNS])
             if scaled:
                 xyz += images
             else:
@@ -359,6 +371,64 @@ def _read_header(
     return None
 
 
+def _read_table(
+    text: str, sep: str, columns: list[str], kept: list[str], dtypes: dict[str, Any]
+) -> pd.DataFrame:
+    """Read the atom rows with the pandas C engine, see ``_parse_rows``."""
+    return pd.read_csv(
+        io.StringIO(text),
+        sep=sep,
+        header=None,
+        names=columns,
+        usecols=kept,
+        dtype=dtypes,
+        index_col=False,
+        engine="c",
+    )
+
+
+def _parse_rows(rows: list[str], columns: list[str], keep_all: bool) -> pd.DataFrame:
+    """Parse the atom rows of one frame with pandas' C parser and sort them by ID.
+
+    Parameters
+    ----------
+    rows : list[str]
+        Lines of the ``ITEM: ATOMS`` block, with line breaks.
+    columns : list[str]
+        Column names from the ``ITEM: ATOMS`` line.
+    keep_all : bool
+        If True, parse all columns; otherwise only the numeric ones.
+
+    Returns
+    -------
+    pd.DataFrame
+        The parsed columns, sorted by atom ID.
+    """
+    # Parsing text to numbers is by far the slowest step for long trajectories, and
+    # the C engine does it about ten times faster than ``str.split`` plus ``astype``.
+    kept = [name for name in columns if keep_all or name in _NUMERIC_COLUMNS]
+    dtypes: dict[str, Any] = {
+        name: str if name not in _NUMERIC_COLUMNS else float for name in kept
+    }
+    dtypes["id"] = np.int64
+    text = "".join(rows)
+    # LAMMPS separates fields by single spaces, which the C engine parses fastest. A
+    # user format with padded fields leaves empty fields, which show up as missing
+    # values (or as an error for the integer ID); only then is the slower
+    # whitespace separator needed.
+    try:
+        frame = _read_table(text, " ", columns, kept, dtypes)
+        padded = bool(frame.isna().to_numpy().any())
+    except ValueError:
+        padded = True
+    if padded:
+        frame = _read_table(text, r"\s+", columns, kept, dtypes)
+    ids = frame["id"].to_numpy()
+    if (ids[1:] < ids[:-1]).any():
+        frame = frame.iloc[np.argsort(ids)]
+    return frame
+
+
 def read_frames(
     filename: str | Path, start: int = 1, stop: int = -1, interval: int = 1
 ) -> Iterator[Frame]:
@@ -410,11 +480,13 @@ def read_frames(
                 return
             if index < start or (index - start) % interval:
                 continue
-            _check_columns(columns, path)
-            table = np.array([row.split() for row in rows])
-            ids = table[:, columns.index("id")].astype(np.int64)
-            order = np.argsort(ids)
-            frame = Frame(timestep, Box.from_bounds(bounds), columns, table[order])
+            if first_ids is None:
+                _check_columns(columns, path)
+            frame = Frame(
+                timestep,
+                Box.from_bounds(bounds),
+                _parse_rows(rows, columns, first_ids is None),
+            )
             if first_ids is None:
                 first_ids = frame.ids
             elif not np.array_equal(frame.ids, first_ids):
