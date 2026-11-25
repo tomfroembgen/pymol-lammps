@@ -400,12 +400,17 @@ guess finds 12325 bonds instead of 9954 for the ionic liquid with water.
 
 ## Preparing the LAMMPS run
 
-The dump needs the columns `id`, `type` and positions. Recommended:
+The dump needs the columns `id`, positions, and `type` or `element`. Recommended:
 
 ```
 dump TRAJ all custom 1000 traj.lammpstrj id mol type q xu yu zu
 ```
 
+- The `type` column may be replaced by `element` (`dump_modify TRAJ element O H`),
+  for example `id element xu yu zu`. With a data file (`data=`), the atom types are
+  then read from the data file by atom ID, so the dump may cover a subset of its
+  atoms. Without a data file, each distinct element becomes one atom type (in
+  alphabetical order, starting at 1), and the bonds are guessed from distances.
 - Write the molecule ID (`mol`) or give a data file, so that molecules can be
   wrapped as a whole.
 - Prefer **unwrapped** coordinates (`xu yu zu`), or wrapped ones together with

@@ -207,15 +207,35 @@ def build_topology(
     ValueError
         If the dump has non-numeric atom types, or atoms missing from the data
         file.
+
+    Notes
+    -----
+    A dump without a ``type`` column takes the types from the data file by atom ID.
+    Without a data file it gets one synthetic type per distinct element of the
+    ``element`` column, in sorted order starting at 1.
     """
     ids = frame.ids
-    type_column = frame.column("type")
-    if not all(t.isdigit() for t in type_column):
+    rows = None if data is None else _positions_in(data.ids, ids)
+    if rows is not None and (rows < 0).any():
+        missing = ids[rows < 0]
         raise ValueError(
-            "the dump uses atom type labels; write numeric types instead "
-            "(dump_modify ... types numeric)"
+            f"{len(missing)} atom IDs of the dump are missing from the data file "
+            f"(first: {missing[0]}); do the files belong to the same system?"
         )
-    types = type_column.astype(np.int64)
+    if "type" in frame.columns:
+        type_column = frame.column("type")
+        if not all(t.isdigit() for t in type_column):
+            raise ValueError(
+                "the dump uses atom type labels; write numeric types instead "
+                "(dump_modify ... types numeric)"
+            )
+        types = type_column.astype(np.int64)
+    elif data is not None and rows is not None:
+        types = data.types[rows]
+    else:
+        # One synthetic type per distinct element, as in ``load_xyz``.
+        _, inverse = np.unique(frame.column("element"), return_inverse=True)
+        types = inverse.astype(np.int64) + 1
 
     names = [str(t) for t in types]
     residue_names = [""] * len(ids)
@@ -223,14 +243,7 @@ def build_topology(
     charges = None
     bonds = None
 
-    if data is not None:
-        rows = _positions_in(data.ids, ids)
-        if (rows < 0).any():
-            missing = ids[rows < 0]
-            raise ValueError(
-                f"{len(missing)} atom IDs of the dump are missing from the data file "
-                f"(first: {missing[0]}); do the files belong to the same system?"
-            )
+    if data is not None and rows is not None:
         names = [
             data.atom_names[r] or data.type_names.get(int(t), str(t))
             for r, t in zip(rows, types)

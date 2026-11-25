@@ -307,14 +307,14 @@ def open_text(path: Path) -> TextIO:
 
 def _check_columns(columns: list[str], path: Path) -> None:
     """Raise if a dump lacks the columns needed to build a trajectory."""
-    missing = [name for name in ("id", "type") if name not in columns]
+    missing = "id" not in columns or not {"type", "element"} & set(columns)
     has_positions = any(
         all(name in columns for name in names) for names, _ in _POSITION_COLUMNS
     )
     if missing or not has_positions:
         raise ValueError(
-            f"{path}: dump needs the columns id, type and one set of positions "
-            f"(x y z, xu yu zu, xs ys zs or xsu ysu zsu); found {' '.join(columns)}"
+            f"{path}: dump needs the columns id, type (or element) and one set of "
+            f"positions (x y z, xu yu zu, xs ys zs or xsu ysu zsu); found {' '.join(columns)}"
         )
 
 
