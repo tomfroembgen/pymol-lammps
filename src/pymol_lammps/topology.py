@@ -206,14 +206,15 @@ def build_topology(
     ------
     ValueError
         If the dump has non-numeric atom types, or atoms missing from the data
-        file.
+        file, or if ``type_elements`` or Drude types are given for a dump with
+        neither a type column nor a data file.
 
     Notes
     -----
     A dump without a ``type`` column takes the types from the data file by atom ID.
     Without a data file it gets one synthetic type per distinct element of the
-    ``element`` column, in sorted order starting at 1, and the atoms are named by
-    element.
+    ``element`` column, in sorted order starting at 1. Its atoms are named by
+    element unless the data file gives a name.
     """
     ids = frame.ids
     rows = None if data is None else _positions_in(data.ids, ids)
@@ -234,11 +235,20 @@ def build_topology(
     elif data is not None and rows is not None:
         types = data.types[rows]
     else:
+        # Options that name atom types would refer to the synthetic types below,
+        # whose numbering the user does not see, and silently mislabel atoms.
+        if type_elements is not None or drude.mode == "types":
+            raise ValueError(
+                "the dump has no type column and no data file is given, so elements= "
+                "and drude=<types> cannot refer to atom types; the element column "
+                "already gives the elements and the Drude label D"
+            )
         # One synthetic type per distinct element, as in ``load_xyz``.
         _, inverse = np.unique(frame.column("element"), return_inverse=True)
         types = inverse.astype(np.int64) + 1
 
-    # Synthetic types carry no meaning, so element-only atoms are named by element.
+    # Atoms without a type column are named by element: synthetic types carry no
+    # meaning, and data-file type numbers are less telling than the element.
     names = (
         [str(t) for t in types]
         if "type" in frame.columns
@@ -251,8 +261,8 @@ def build_topology(
 
     if data is not None and rows is not None:
         names = [
-            data.atom_names[r] or data.type_names.get(int(t), str(t))
-            for r, t in zip(rows, types)
+            data.atom_names[r] or data.type_names.get(int(t), fallback)
+            for r, t, fallback in zip(rows, types, names)
         ]
         residue_names = [data.residue_names[r] for r in rows]
         if data.mol_ids is not None:

@@ -410,7 +410,9 @@ dump TRAJ all custom 1000 traj.lammpstrj id mol type q xu yu zu
   for example `id element xu yu zu`. With a data file (`data=`), the atom types are
   then read from the data file by atom ID, so the dump may cover a subset of its
   atoms. Without a data file, each distinct element becomes one atom type (in
-  alphabetical order, starting at 1), and the bonds are guessed from distances.
+  alphabetical order, starting at 1), the bonds are guessed from distances, and
+  `elements=` and `drude=<types>` are refused, since there are no real atom types
+  to refer to. Atoms without a name in the data file are named by element.
 - Write the molecule ID (`mol`) or give a data file, so that molecules can be
   wrapped as a whole.
 - Prefer **unwrapped** coordinates (`xu yu zu`), or wrapped ones together with

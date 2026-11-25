@@ -2,12 +2,14 @@
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 from conftest import frame_text, water_frame
 
 from pymol_lammps.datafile import read_data
+from pymol_lammps.drude import DrudeSetting
 from pymol_lammps.dump import Frame, read_frames
 from pymol_lammps.elements import element_from_mass
 from pymol_lammps.topology import build_topology
@@ -136,6 +138,40 @@ def test_element_only_dump_takes_types_from_data_file(
     np.testing.assert_array_equal(topology.bonds, [[0, 1], [0, 2], [3, 4], [3, 5]])
 
 
+# Data file as written by write_data: no type labels and no Masses comments.
+UNNAMED_WATER_DATA = """LAMMPS data file via write_data
+
+3 atoms
+2 atom types
+
+0 10 xlo xhi
+0 10 ylo yhi
+0 10 zlo zhi
+
+Masses
+
+1 1.008
+2 15.999
+
+Atoms # full
+
+1 1 2 -0.8 0 0 0 0 0 0
+2 1 1 0.4 1 0 0 0 0 0
+3 1 1 0.4 0 1 0 0 0 0
+"""
+
+
+def test_element_only_dump_with_unnamed_data_file_names_atoms_by_element(
+    write_file: WriteFile,
+) -> None:
+    data = read_data(write_file("unnamed.data", UNNAMED_WATER_DATA))
+
+    topology = build_topology(element_frame(write_file, [1, 2, 3]), data)
+
+    np.testing.assert_array_equal(topology.types, [2, 1, 1])
+    assert topology.names == ["O", "H", "H"]
+
+
 def test_element_only_dump_of_a_group_keeps_bonds_within_it(
     write_file: WriteFile, water_data: Path
 ) -> None:
@@ -180,6 +216,19 @@ def test_drude_label_in_element_only_dump_is_kept(write_file: WriteFile) -> None
 
     assert topology.elements == ["O", "D"]
     np.testing.assert_array_equal(topology.types, [2, 1])
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"type_elements": ["O", "H"]}, {"drude": DrudeSetting("types", frozenset({1}))}],
+)
+def test_type_options_for_element_only_dump_without_data_raise(
+    write_file: WriteFile, options: dict[str, Any]
+) -> None:
+    frame = element_frame(write_file, [1, 2, 3])
+
+    with pytest.raises(ValueError, match="cannot refer to atom types"):
+        build_topology(frame, **options)
 
 
 def test_dump_without_type_and_element_raises(write_file: WriteFile) -> None:
