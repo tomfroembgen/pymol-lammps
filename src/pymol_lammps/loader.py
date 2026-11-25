@@ -1,10 +1,10 @@
 """PyMOL commands for LAMMPS trajectories.
 
-``register()`` adds the ``load_lammps``, ``load_xyz``, ``lammps_wrap`` and
-``drude_style`` commands and lets PyMOL's ``load`` open ``.lammpstrj`` files. Only
-public PyMOL API is used, except the format table that connects ``load`` to this
-reader (``pymol.importing.loadfunctions``); if a PyMOL update removes that table,
-``load_lammps`` keeps working.
+``register()`` adds the ``load_lammps``, ``load_xyz``, ``lammps_wrap``,
+``drude_style`` and ``drawgridbox`` commands and lets PyMOL's ``load`` open
+``.lammpstrj`` files. Only public PyMOL API is used, except the format table that
+connects ``load`` to this reader (``pymol.importing.loadfunctions``); if a PyMOL
+update removes that table, ``load_lammps`` keeps working.
 """
 
 import contextlib
@@ -43,6 +43,7 @@ from pymol_lammps.drude import (
     satellite_mask,
 )
 from pymol_lammps.dump import Box, parse_cell, read_frames
+from pymol_lammps.gridbox import drawgridbox
 from pymol_lammps.style import colour_satellites, drude_style, refresh_dashes
 from pymol_lammps.topology import Topology, build_topology
 from pymol_lammps.wrapping import (
@@ -991,8 +992,8 @@ def lammps_wrap(
 def register(_self: Any = cmd) -> None:
     """Add the commands to PyMOL and let ``load`` open ``.lammpstrj`` files.
 
-    The commands are ``load_lammps``, ``load_xyz``, ``lammps_wrap`` and
-    ``drude_style``.
+    The commands are ``load_lammps``, ``load_xyz``, ``lammps_wrap``,
+    ``drude_style`` and ``drawgridbox``.
 
     Parameters
     ----------
@@ -1003,6 +1004,7 @@ def register(_self: Any = cmd) -> None:
     _self.extend("load_xyz", load_xyz)
     _self.extend("lammps_wrap", lammps_wrap)
     _self.extend("drude_style", drude_style)
+    _self.extend("drawgridbox", drawgridbox)
     for command, file_keys in FILE_ARGUMENTS.items():
         register_completion(command, file_keys, _self)
     # Internal PyMOL table; skip quietly if a future version renames it.

@@ -432,6 +432,27 @@ dump TRAJ all custom 1000 traj.lammpstrj id mol type q xu yu zu
 - Gzipped dumps (`traj.lammpstrj.gz`) are read directly.
 
 
+## Grid box around a selection
+
+To see where atoms lie in space, for example in which part of the box a molecule
+stays, `drawgridbox` draws a box around a selection and divides it into a regular
+grid of cells. The box spans the atom centres of the selection in the current state.
+It can be widened on all sides with `padding` (in Angstrom) and on single sides with
+`pxlo`, `pylo`, `pzlo` (lower x, y, z) and `pxhi`, `pyhi`, `pzhi` (upper x, y, z).
+`nx`, `ny` and `nz` give the number of cells along each axis, `lw` the line width in
+pixels, and `r`, `g`, `b` the colour, each between 0 and 1 (default black). Each call
+creates a new object `gridbox01`, `gridbox02`, and so on.
+
+```
+drawgridbox resn LIG, nx=4, ny=4, nz=4, padding=2    # 4 x 4 x 4 cells around LIG
+drawgridbox all, r=1                                 # red box around everything
+```
+
+The box of a loaded trajectory is drawn by `load_lammps` itself as `<object>_box`;
+`drawgridbox` is meant for boxes around parts of the system. The command is adapted
+from the script [DrawGridBox](https://pymolwiki.org/index.php/DrawGridBox) by
+Cunliang Geng (BSD-2-Clause license, kept in `src/pymol_lammps/gridbox.py`).
+
 ## Command reference
 
 ```
@@ -439,6 +460,8 @@ load_lammps filename [, data [, object [, start [, stop [, interval
             [, elements [, box [, wrap [, quiet [, drude ]]]]]]]]]]
 lammps_wrap [ object [, wrap [, quiet ]]]
 drude_style [ selection [, dashed [, quiet ]]]
+drawgridbox [ selection [, nx [, ny [, nz [, padding [, lw [, r [, g [, b
+            [, pxlo [, pylo [, pzlo [, pxhi [, pyhi [, pzhi [, quiet ]]]]]]]]]]]]]]]
 load_xyz filename [, object [, start [, stop [, interval [, cell [, box
          [, wrap [, quiet [, drude ]]]]]]]]]
 ```
@@ -464,6 +487,9 @@ load_lammps traj.lammpstrj, data=system.data, interval=10    # every 10th frame
 load_lammps traj.lammpstrj, elements=C H O N                 # no data file
 load_lammps traj.lammpstrj, data=system.data, object=run1, box=0
 ```
+
+The arguments of `drawgridbox` are described in
+[Grid box around a selection](#grid-box-around-a-selection).
 
 For `load_xyz`, the arguments `object`, `start`, `stop`, `interval`, `box`, `wrap`
 and `quiet` mean the same as above, `drude` accepts only `auto` and `0`, and `cell`
