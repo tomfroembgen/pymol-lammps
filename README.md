@@ -97,11 +97,14 @@ atoms that are connected by bonds, with the bonds guessed from the first frame (
 ```
 lammps_wrap traj, 0       # back to the coordinates of the dump (e.g. to follow diffusion)
 lammps_wrap traj          # wrap again
+lammps_wrap wrap=0        # same, for the object loaded last (no name needed)
 load_lammps traj.lammpstrj, data=system.data, wrap=0      # load without wrapping
 ```
 
 `lammps_wrap` re-reads the coordinates from the dump file and keeps
-representations and colours. A molecule that crosses the boundary jumps to the
+representations and colours. Without an object name it acts on the object loaded
+last with `load_lammps` or `load_xyz` that still exists in the session, and it
+prints the name it chose. A molecule that crosses the boundary jumps to the
 opposite side between two frames; this is expected for wrapped coordinates.
 
 If the dump has wrapped coordinates without image flags, molecules cut by the
@@ -156,7 +159,7 @@ residue name is empty.
 cell boundary when the file was written is first put together again, by walking
 along its bonds. Then every molecule is shifted by whole cell vectors so that its
 centre of geometry lies inside the cell, as in `load_lammps`. With `wrap=0` the
-coordinates stay as in the file. The command `lammps_wrap object [, 0|1]` also
+coordinates stay as in the file. The command `lammps_wrap [object [, 0|1]]` also
 works on objects from `load_xyz` and switches between the two views after loading.
 
 **Limitations.**
@@ -429,7 +432,7 @@ dump TRAJ all custom 1000 traj.lammpstrj id mol type q xu yu zu
 ```
 load_lammps filename [, data [, object [, start [, stop [, interval
             [, elements [, box [, wrap [, quiet [, drude ]]]]]]]]]]
-lammps_wrap object [, wrap [, quiet ]]
+lammps_wrap [ object [, wrap [, quiet ]]]
 drude_style [ selection [, dashed [, quiet ]]]
 load_xyz filename [, object [, start [, stop [, interval [, cell [, box
          [, wrap [, quiet [, drude ]]]]]]]]]
