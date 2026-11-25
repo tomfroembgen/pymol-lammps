@@ -136,6 +136,80 @@ def test_lammps_wrap_needs_a_loaded_object() -> None:
         lammps_wrap("nothing")
 
 
+def test_lammps_wrap_defaults_to_the_last_loaded_object(
+    water_dump: Path, water_data: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    load_lammps(str(water_dump), data=str(water_data), object="one")
+    load_lammps(str(water_dump), data=str(water_data), object="two")
+
+    lammps_wrap(wrap=0)
+
+    assert box_extent("two", 3)[1] > 5.9
+    assert box_extent("one", 3)[1] < 5.0
+    assert "'two'" in capsys.readouterr().out
+
+
+def test_reloading_an_object_makes_it_the_last_one(
+    water_dump: Path, water_data: Path
+) -> None:
+    load_lammps(str(water_dump), data=str(water_data), object="one")
+    load_lammps(str(water_dump), data=str(water_data), object="two")
+    load_lammps(str(water_dump), data=str(water_data), object="one")
+
+    lammps_wrap(wrap=0, quiet=1)
+
+    assert box_extent("one", 3)[1] > 5.9
+    assert box_extent("two", 3)[1] < 5.0
+
+
+def test_lammps_wrap_default_skips_deleted_objects(
+    water_dump: Path, water_data: Path
+) -> None:
+    load_lammps(str(water_dump), data=str(water_data), object="one")
+    load_lammps(str(water_dump), data=str(water_data), object="two")
+    cmd.delete("two")
+
+    lammps_wrap(wrap="0", quiet=1)
+
+    assert box_extent("one", 3)[1] > 5.9
+
+
+def test_lammps_wrap_default_needs_a_loaded_object(
+    water_dump: Path, water_data: Path
+) -> None:
+    with pytest.raises(pymol.CmdException, match="no object loaded"):
+        lammps_wrap(wrap=0)
+
+    load_lammps(str(water_dump), data=str(water_data), object="only")
+    cmd.delete("only")
+    with pytest.raises(pymol.CmdException, match="no object loaded"):
+        lammps_wrap()
+
+
+def test_lammps_wrap_explicit_name_ignores_the_last_loaded(
+    water_dump: Path, water_data: Path
+) -> None:
+    load_lammps(str(water_dump), data=str(water_data), object="one")
+    load_lammps(str(water_dump), data=str(water_data), object="two")
+
+    lammps_wrap("one", 0, quiet=1)
+
+    assert box_extent("one", 3)[1] > 5.9
+    assert box_extent("two", 3)[1] < 5.0
+
+
+def test_lammps_wrap_without_name_through_the_pymol_parser(
+    water_dump: Path, water_data: Path
+) -> None:
+    load_lammps(str(water_dump), data=str(water_data), object="water")
+
+    cmd.do("lammps_wrap wrap=0")
+    assert box_extent("water", 3)[1] > 5.9
+
+    cmd.do("lammps_wrap wrap=1")
+    assert box_extent("water", 3)[1] < 5.0
+
+
 def test_no_molecule_ids_warns_for_unwrapped_dump(
     write_file: WriteFile, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -110,6 +110,33 @@ class _Trajectory:
 _TRAJECTORIES: dict[str, _Trajectory] = {}
 
 
+def _remember(name: str, trajectory: _Trajectory) -> None:
+    """Store a loaded trajectory as the most recent one.
+
+    The entry moves to the end of ``_TRAJECTORIES`` also when ``name`` was loaded
+    before, so that the order of the dict is the order of loading.
+    """
+    _TRAJECTORIES.pop(name, None)
+    _TRAJECTORIES[name] = trajectory
+
+
+def _last_loaded(_self: Any) -> str:
+    """Name of the most recently loaded object that still exists in PyMOL.
+
+    Raises
+    ------
+    pymol.CmdException
+        If no object from ``load_lammps`` or ``load_xyz`` is left in the session.
+    """
+    present = set(_self.get_names("objects"))
+    for name in reversed(_TRAJECTORIES):
+        if name in present:
+            return name
+    raise pymol.CmdException(
+        "no object loaded with load_lammps or load_xyz in this session"
+    )
+
+
 @contextlib.contextmanager
 def _pymol_messages(command: str) -> Iterator[None]:
     """Print warnings to the PyMOL console and turn ValueError into CmdException."""
@@ -596,7 +623,7 @@ def load_lammps(
         )
         n_states, cut = _load_states(name, states, trajectory, check, show_box, _self)
 
-    _TRAJECTORIES[name] = replace(trajectory, removed=cut)
+    _remember(name, replace(trajectory, removed=cut))
 
     if not int(quiet):
         print(
@@ -837,7 +864,7 @@ def load_xyz(
         )
         n_states, cut = _load_states(name, states, trajectory, do_wrap, show_box, _self)
 
-    _TRAJECTORIES[name] = replace(trajectory, removed=cut)
+    _remember(name, replace(trajectory, removed=cut))
 
     if not int(quiet):
         print(
@@ -868,7 +895,7 @@ def _raw_frames(trajectory: _Trajectory) -> Iterator[_RawFrame]:
 
 
 def lammps_wrap(
-    object: str, wrap: int | str = 1, quiet: int | str = 0, *, _self: Any = cmd
+    object: str = "", wrap: int | str = 1, quiet: int | str = 0, *, _self: Any = cmd
 ) -> None:
     """Wrap or unwrap the molecules of an object from ``load_lammps`` or ``load_xyz``.
 
@@ -880,20 +907,27 @@ def lammps_wrap(
     loaded without a cell has nothing to wrap into; a warning is printed. All frames
     are read before the object is changed, so an error leaves it as it was.
 
+    Without an object name, the command acts on the object loaded last with
+    ``load_lammps`` or ``load_xyz`` that still exists in the session. The summary
+    line names the object.
+
     PyMOL usage::
 
-        lammps_wrap object [, wrap [, quiet ]]
+        lammps_wrap [ object [, wrap [, quiet ]]]
 
     Examples::
 
+        lammps_wrap wrap=0        # last loaded object, coordinates as in the file
+        lammps_wrap wrap=1        # last loaded object, molecules into the box
         lammps_wrap traj          # molecules into the box
         lammps_wrap traj, 0       # coordinates as in the dump (e.g. diffusion)
         lammps_wrap aimd, 0       # coordinates as in the xyz file
 
     Parameters
     ----------
-    object : str
+    object : str, optional
         Object loaded with ``load_lammps`` or ``load_xyz`` in this PyMOL session.
+        Empty (default): the object loaded last that still exists.
     wrap : int, optional
         1 to wrap molecules into the box, 0 to restore the file coordinates.
     quiet : int, optional
@@ -903,8 +937,9 @@ def lammps_wrap(
     ------
     pymol.CmdException
         If the object was not loaded with ``load_lammps`` or ``load_xyz`` in this
-        session.
+        session, or if ``object`` is empty and no such object exists.
     """
+    object = object or _last_loaded(_self)
     trajectory = _TRAJECTORIES.get(object)
     if trajectory is None or object not in _self.get_names("objects"):
         raise pymol.CmdException(
