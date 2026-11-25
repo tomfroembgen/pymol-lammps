@@ -466,6 +466,12 @@ is the periodic cell as described in
 [Loading xyz trajectories](#loading-xyz-trajectories). `lammps_wrap` accepts
 objects from both loaders.
 
+The Tab key completes file paths for the file arguments of `load_lammps` and
+`load_xyz`, also behind a keyword, for example `load_lammps traj.lammpstrj, data=sys`
+followed by Tab. Other keyword arguments are not completed. This uses PyMOL's
+internal list `cmd.auto_arg`; if a future PyMOL lacks it, the plugin still loads and
+only the completion of keyword arguments is lost.
+
 From a Python script:
 `from pymol_lammps.loader import lammps_wrap, load_lammps, load_xyz`.
 

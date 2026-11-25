@@ -32,6 +32,7 @@ from pymol_lammps.bonds import (
     periodic_bonds,
     satellite_bonds,
 )
+from pymol_lammps.completion import FILE_ARGUMENTS, register_completion
 from pymol_lammps.datafile import read_data
 from pymol_lammps.drude import (
     DEUTERIUM_DISTANCE,
@@ -1002,6 +1003,8 @@ def register(_self: Any = cmd) -> None:
     _self.extend("load_xyz", load_xyz)
     _self.extend("lammps_wrap", lammps_wrap)
     _self.extend("drude_style", drude_style)
+    for command, file_keys in FILE_ARGUMENTS.items():
+        register_completion(command, file_keys, _self)
     # Internal PyMOL table; skip quietly if a future version renames it.
     loadfunctions = getattr(importing, "loadfunctions", None)
     if loadfunctions is not None:
