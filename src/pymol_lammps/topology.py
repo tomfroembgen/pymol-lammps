@@ -212,7 +212,8 @@ def build_topology(
     -----
     A dump without a ``type`` column takes the types from the data file by atom ID.
     Without a data file it gets one synthetic type per distinct element of the
-    ``element`` column, in sorted order starting at 1.
+    ``element`` column, in sorted order starting at 1, and the atoms are named by
+    element.
     """
     ids = frame.ids
     rows = None if data is None else _positions_in(data.ids, ids)
@@ -237,7 +238,12 @@ def build_topology(
         _, inverse = np.unique(frame.column("element"), return_inverse=True)
         types = inverse.astype(np.int64) + 1
 
-    names = [str(t) for t in types]
+    # Synthetic types carry no meaning, so element-only atoms are named by element.
+    names = (
+        [str(t) for t in types]
+        if "type" in frame.columns
+        else frame.column("element").tolist()
+    )
     residue_names = [""] * len(ids)
     residue_ids = [""] * len(ids)
     charges = None

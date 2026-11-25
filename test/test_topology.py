@@ -168,7 +168,7 @@ def test_element_only_dump_without_data_gets_one_type_per_element(
     # np.unique sorts the elements: H is type 1, O is type 2.
     np.testing.assert_array_equal(topology.types, [2, 1, 1, 2, 1, 1])
     assert topology.elements == ["O", "H", "H"] * 2
-    assert topology.names == ["2", "1", "1"] * 2
+    assert topology.names == ["O", "H", "H"] * 2
     assert topology.bonds is None
 
 
