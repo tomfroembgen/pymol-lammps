@@ -403,6 +403,11 @@ def _parse_rows(rows: list[str], columns: list[str], keep_all: bool) -> pd.DataF
     -------
     pd.DataFrame
         The parsed columns, sorted by atom ID.
+
+    Raises
+    ------
+    ValueError
+        If rows have fewer fields than there are columns.
     """
     # Parsing text to numbers is by far the slowest step for long trajectories, and
     # the C engine does it about ten times faster than ``str.split`` plus ``astype``.
@@ -423,6 +428,10 @@ def _parse_rows(rows: list[str], columns: list[str], keep_all: bool) -> pd.DataF
         padded = True
     if padded:
         frame = _read_table(text, r"\s+", columns, kept, dtypes)
+        # Missing values that remain mean rows with too few fields, e.g. a line cut
+        # off while LAMMPS writes the dump; a literal "nan" (a blown-up run) is kept.
+        if frame.isna().to_numpy().any() and "nan" not in text.lower():
+            raise ValueError("atom rows have fewer fields than the ITEM: ATOMS line")
     ids = frame["id"].to_numpy()
     if (ids[1:] < ids[:-1]).any():
         frame = frame.iloc[np.argsort(ids)]
@@ -456,8 +465,9 @@ def read_frames(
     Raises
     ------
     ValueError
-        If the dump lacks the required columns, or if the atom IDs differ between
-        frames (atoms added or removed during the run).
+        If the dump lacks the required columns, if rows have fewer fields than
+        columns, or if the atom IDs differ between frames (atoms added or removed
+        during the run).
     """
     path = Path(filename)
     first_ids: NDArray[np.int64] | None = None
@@ -482,11 +492,13 @@ def read_frames(
                 continue
             if first_ids is None:
                 _check_columns(columns, path)
-            frame = Frame(
-                timestep,
-                Box.from_bounds(bounds),
-                _parse_rows(rows, columns, first_ids is None),
-            )
+            try:
+                data = _parse_rows(rows, columns, first_ids is None)
+            except ValueError as error:
+                raise ValueError(
+                    f"{path}: frame {index} (timestep {timestep}): {error}"
+                ) from None
+            frame = Frame(timestep, Box.from_bounds(bounds), data)
             if first_ids is None:
                 first_ids = frame.ids
             elif not np.array_equal(frame.ids, first_ids):

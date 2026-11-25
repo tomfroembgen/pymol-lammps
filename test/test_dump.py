@@ -167,3 +167,19 @@ def test_later_frames_keep_only_numeric_columns(water_dump: Path) -> None:
 
     assert "type" in first.columns
     assert second.columns == ["id", "x", "y", "z"]
+
+
+def test_row_with_missing_fields_raises(write_file: WriteFile) -> None:
+    # A line cut off while LAMMPS writes the dump.
+    text = frame_text("id type x y z", [[1, 1, 0.5, 1.5, 2.5], [2, 2, 3.5, 4.5]])
+
+    with pytest.raises(ValueError, match="fewer fields"):
+        next(read_frames(write_file("t.lammpstrj", text)))
+
+
+def test_nan_positions_are_kept(write_file: WriteFile) -> None:
+    text = frame_text("id type x y z", [[1, 1, "nan", 1.5, 2.5], [2, 2, 3.5, 4.5, 5.5]])
+
+    frame = next(read_frames(write_file("t.lammpstrj", text)))
+
+    assert np.isnan(frame.positions()[0, 0])
