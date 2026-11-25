@@ -194,3 +194,40 @@ def test_unknown_element_label_is_bonded_like_carbon(
     assert "no covalent radius for the element labels ['X']" in capsys.readouterr().out
     assert n_bonds("labels") == 1
     assert atoms("labels")[0][2] == "X"
+
+
+def element_dump(write_file: WriteFile) -> Path:
+    """Two-frame water dump with the columns ``id element xu yu zu``, rows shuffled."""
+    elements = ["O", "H", "H", "O", "H", "H"]
+    texts = []
+    for step, (shift, order) in enumerate([(0.0, range(6)), (1.0, [5, 3, 1, 0, 4, 2])]):
+        rows = [
+            [i + 1, elements[i], WATER_POSITIONS[i][0] + shift, *WATER_POSITIONS[i][1:]]
+            for i in order
+        ]
+        texts.append(frame_text("id element xu yu zu", rows, step))
+    return write_file("elements.lammpstrj", "".join(texts))
+
+
+@pytest.mark.parametrize("wrap", [0, 1])
+def test_element_only_dump_with_data_file(
+    write_file: WriteFile, water_data: Path, wrap: int
+) -> None:
+    load_lammps(
+        str(element_dump(write_file)), data=str(water_data), object="e", wrap=wrap
+    )
+
+    assert cmd.count_states("e") == 2
+    assert n_bonds("e") == 4
+    first = atoms("e")
+    assert first[0] == (1, "OW", "O", "SPC", "1", 0.0)
+    x = [a[5] for a in atoms("e", 2)]
+    np.testing.assert_allclose(x, np.array(WATER_POSITIONS)[:, 0] + 1, atol=1e-5)
+
+
+def test_element_only_dump_without_data_file(write_file: WriteFile) -> None:
+    load_lammps(str(element_dump(write_file)), object="e", wrap=0)
+
+    assert cmd.count_states("e") == 2
+    assert n_bonds("e") == 4
+    assert [a[2] for a in atoms("e")] == ["O", "H", "H", "O", "H", "H"]
